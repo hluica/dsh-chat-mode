@@ -29,7 +29,7 @@ Chat 会话的输入框左侧会出现两个紧凑下拉框：
 
 默认状态：
 
-- 权限：新 Chat 会话固定为 **仅可查看**；恢复的 Chat 会话保留已保存的 `read-only` / `workspace-write`，若发现更宽权限则纠正为 `read-only`。
+- 权限：新 Chat 会话在**创建时**即 pin 为 **仅可查看**（早于首轮请求，空白新会话界面也显示正确值）；恢复的 Chat 会话保留已保存的 `read-only` / `workspace-write`，若发现更宽权限则纠正为 `read-only`。
 - 工具：两项都**不勾选**，即 `bash`/`pwsh` 与 `web_search` 不出现在模型工具列表中。
 - `read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question` 始终可用，但由 system prompt 约束为“只在用户明确要求时使用”。
 
@@ -65,7 +65,8 @@ preset-chat (id: chat, name: Chat, order: 5)
 
 ### 权限锁定
 
-- preset 插件在 `agent/created` 时读取 `ctx.permissionPresets.current(session)`：
+- Host 半在 `session/created` 后的下一个 microtask 中，对 `header.agentPreset === 'chat'` 且未 seeded 的新会话 pin `read-only`（`session/created` 同步 dispatch 期间 Session 只读，不能直接 append）；这发生在 Agent/首轮请求之前，因此空白新会话界面和首轮请求都看到正确的权限。空白会话被切换到 Chat 时，`agent-preset/selected` 也会触发同样的 pin。
+- preset 插件在 `agent/created`（`prepend: true`）时读取 `ctx.permissionPresets.current(session)`：
   - `source === 'startup'`（新会话）→ 固定为 `read-only`；
   - `resume` / `clear` / `compact` → 只保留 `read-only` / `workspace-write`；
   - 如果全局默认被设为完全权限，新 Chat 会话仍会被纠正为 `read-only`。
@@ -79,9 +80,11 @@ preset-chat (id: chat, name: Chat, order: 5)
   - `shell: false` → 隐藏 `bash`（Windows 为 `pwsh`）；
   - `webSearch: false` → 隐藏 `web_search`；
   - 用户启用后 dispose 对应 restriction，下一次 step 的工具 schema 出现。
+- `agent/created` listener 使用 `prepend: true`，尽量早于普通 creation observer；`known` 为空时不缓存，并在 `tools/change` 时对已知 Chat Agent 重新应用 restriction，避免“首轮包含、第二轮才移除”。
 - `tools/pre-execute` 兜底：如果某个 batch 在 restriction 变化前已解析，调用被关闭的工具会得到明确的 deny 文本，提示用户在“对话设置”中启用。
 - 状态由 log-only 的 `chat-mode/tools` 事件与 `chatMode` 会话投影持久化，resume/fork 后恢复。
 - open turn 期间切换工具不会直接 append；选择先进入内存 pending，在下一个 accepted `agent/pre-step` 写入，restriction 立即按 pending 生效。
+- 注意：agent loop 在 `agent/pre-step` **之前**就 resolve 工具集，因此 pre-step reapply 只影响后续 step；首轮的正确性依靠 Host 提前 pin、`agent/created` prepend 与 `tools/change` 重试。
 
 ### 客户端控件
 
@@ -163,6 +166,11 @@ plugin_manager install_bundle
 - 若在模型运行中切换，选择会在下一个 accepted pre-step 写入；工具 schema 可能要到下一轮才出现。
 - 检查 `agent.ctx.tools.schemas(agent)` 是否包含 `bash`；若包含但模型不调用，检查 system prompt 是否要求用户明确指示。
 
+**首轮工具列表仍包含持久终端 / 联网搜索**
+
+- 确认已重启 DSH；Host 半与 preset 插件的变化不会只靠刷新页面生效。
+- 检查 `agent/created` listener 是否为 `prepend: true`、`tools/change` 是否在工具注册后重新应用 restriction；若首轮仍出现，说明首轮 `tools.resolve` 确实发生在 restriction 之前，需要采用 FEASIBILITY 13.4.3 的动态挂载方案。
+
 **权限下拉框选“工作区内修改”后仍无法写文件**
 
 - Chat 模式没有 `write`/`edit`/`apply_patch`；只能通过勾选“持久终端”后用 shell 在工作区内写。
@@ -186,7 +194,7 @@ plugin_manager install_bundle
 
 | 项目 | 值 |
 | --- | --- |
-| 插件版本 | `1.1.0` |
+| 插件版本 | `1.1.1` |
 | 包名 | `@local/dsh-chat-mode` |
 | Loader entry id | `dsh-chat-mode` |
 | preset id | `chat` |

@@ -28,6 +28,7 @@ function harness(options = {}) {
   let logged = { shell: false, webSearch: false }
   const restrictions = []
   const handlers = new Map()
+  const handlerOptions = new Map()
   let projectionDefinition
   let turnOpen = openTurn
 
@@ -89,8 +90,9 @@ function harness(options = {}) {
     agents: {
       turnBoundaryOf() { return { openTurnStartSeq: turnOpen ? 1 : null } },
     },
-    on(event, handler) {
+    on(event, handler, options) {
       handlers.set(event, handler)
+      handlerOptions.set(event, options)
       return () => {}
     },
     inject(deps, callback) {
@@ -117,8 +119,10 @@ function harness(options = {}) {
     permissionSets,
     restrictions,
     handlers,
+    handlerOptions,
     get projectionDefinition() { return projectionDefinition },
     setTurnOpen(value) { turnOpen = value },
+    registerTool(name) { available.add(name) },
     get current() { return current },
   }
 }
@@ -235,6 +239,19 @@ function command(list, name) {
   assert.equal(allowed.kind, 'allow')
   const webDenied = await guard({ agent: h.agent, name: 'web_search' }, async () => ({ kind: 'allow' }))
   assert.equal(webDenied.kind, 'deny')
+}
+
+// 8. The creation listener is prepend, and a late tool registration is caught by tools/change.
+{
+  const h = await boot({ tools: [] })
+  assert.equal(h.handlerOptions.get('agent/created')?.prepend, true, 'creation listener should run before ordinary observers')
+  h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
+  assert.equal(h.restrictions.length, 0, 'nothing to restrict before the tools register')
+  h.registerTool('bash')
+  h.registerTool('web_search')
+  h.handlers.get('tools/change')()
+  assert.equal(h.restrictions.at(-1).kind, 'restrict')
+  assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
 }
 
 console.log('chat-mode preset: all logic checks passed')

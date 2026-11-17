@@ -1584,22 +1584,23 @@ createSession -> 立即读取 permission / tools.schemas
 export const inject = ['permissionPresets']
 
 export function apply(ctx) {
-  // Fresh chat sessions: pin read-only before any prompt/agent.
+  // session/created dispatch keeps the Session read-only; an append made by
+  // a creation listener throws. Defer one microtask.
   ctx.on('session/created', (session) => {
-    if (session.header.agentPreset !== 'chat') return
-    if (session.header.isSeeded === true) return // resumed/seeded sessions keep their choice
-    pin(ctx, session)
+    queueMicrotask(() => pin(ctx, session))
   })
-  // Preset switched to chat while blank: pin read-only.
+  // Preset switched to chat while blank: appending inside an append
+  // notification reenters, so defer too.
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'agent-preset/selected') return
     if (event.data.agentPreset !== 'chat') return
-    if (session.header.isSeeded === true) return
-    pin(ctx, session)
+    queueMicrotask(() => pin(ctx, session, true))
   })
 }
 
-function pin(ctx, session) {
+function pin(ctx, session, bySelection = false) {
+  if (!bySelection && session.header.agentPreset !== 'chat') return
+  if (session.header.isSeeded === true) return
   try {
     if (ctx.permissionPresets.current(session) !== 'read-only') {
       ctx.permissionPresets.set(session, 'read-only')
@@ -1613,10 +1614,11 @@ function pin(ctx, session) {
 注意：
 
 - `session/created` 的 listener 是 `(session)`；`session/event` 是 `(session, event)`（与 `dsh-agent-preset-registry/src/index.ts` 的用法一致）。
+- **关键约束**：`dsh-session` 的 `announce()` 文档明确“The Session remains read-only throughout synchronous dispatch; successful completion enables appends”；`publicationEntry()` 也会在 `announcement !== 'complete'` 时拒绝 append。因此 `session/created` listener 必须 `queueMicrotask`，不能在同步 dispatch 中 `permissionPresets.set`。
+- `session/event` 的通知发生在 `commit()` 的 append 发布期间；同步 append 会触发 `session append cannot reenter while another append is being published`，因此也必须 defer。
 - `isSeeded` 用来避免把已恢复的 workspace-write Chat 会话重置为 read-only。
 - `session/created` 可能对恢复的会话也触发；`isSeeded` 与 `agent/created` 的 `source` 双重判断。
 - 该 pin 在 `permissionPresets` 的 `permissions` 投影已注册后生效；Host 激活顺序保证这一点。
-- 若 `set` 在 `session/created` 中重入有问题，可改为 `queueMicrotask`，但需在首个 prompt 之前完成。
 
 #### 13.4.2 preset 半：更早的 restriction
 
@@ -1664,3 +1666,35 @@ function pin(ctx, session) {
 
 - 若方便，请提供出问题的 Chat 会话 ID（或会话头/首轮 `request/header` 的工具列表），以便确认首轮实际请求是否包含 `bash`/`web_search`，而不只是统计面板的显示。
 - 若无法提供，按 13.4.1/13.4.2 先修复并验收；若首轮仍出现，再采用 13.4.3 的动态挂载方案。
+
+### 13.7 实施记录（2026-11-17）
+
+**代码变化**：
+
+- `index.js`（Host 半）不再为空：
+  - `inject = ['permissionPresets']`；
+  - `session/created`：对 `header.agentPreset === 'chat'` 且 `isSeeded !== true` 的会话，在**下一个 microtask** 中 `permissionPresets.set(session, 'read-only')`；
+  - `session/event`：对 `agent-preset/selected` 且 `agentPreset === 'chat'` 的空白会话，同样在 microtask 中 pin；
+  - **defer 的原因**：`dsh-session` 的 `announce()` 在同步 `session/created` dispatch 期间保持 Session read-only，`publicationEntry()` 会拒绝 append；`session/event` 的通知在 append 发布期间，同步 append 会触发 reentry 错误。microtask 在 dispatch 完成之后、首个 prompt 之前运行；
+  - `pin()` 先读 `current`，已是 `read-only` 则 no-op；异常只记录 warning，交给 preset 半的 `agent/created` 重试。
+- `preset.js`：
+  - `ctx.on('agent/created', ..., { prepend: true })`；
+  - `applyRestrictions` 的 entry 保存 `agent` 引用；`known` 为空时每次重新计算，不再永久缓存空数组；
+  - 新增 `ctx.on('tools/change', ...)`：遍历已知 Chat Agent 重新 `applyRestrictions`，用 `key` 去重终止自身 restrict 触发的递归；
+  - `agent/pre-step` 在已初始化时也 reapply restriction，作为后续 step 的兜底；注释明确它不能改变当前 step 已 resolve 的 toolSet。
+- `scripts/host-contract.mjs`：增加 Host 半 `permissionPresets` inject、`session/created`/`session/event` listener、fresh/seeded/switch 三种 pin 分支的断言。
+- `scripts/test.mjs`：增加 `agent/created` prepend 断言；增加“初始工具为空 → 稍后注册 → `tools/change` 重新限制”的断言。
+- `package.json`：`1.1.0` → `1.1.1`。
+- `README.md`：更新默认权限（创建时 pin）、权限锁定、工具按需启用（prepend/tools-change/pre-step 限制说明）、故障排查、版本契约 `1.1.1`。
+
+**验证**：
+
+- `npm test`：preset 逻辑测试（含 prepend、tools/change、空 known 重试）+ client smoke test 全部通过；
+- `npm run build`：`verify · all checks passed`，包括 Host 探针的 fresh/seeded/switch pin 分支；
+- 未在本次运行中直接复现 GUI 的首个 prompt；低风险修复已就位，需重启后在 GUI 复测首轮工具列表与权限。
+- 如果首轮仍包含 gated 工具，说明首轮 `tools.resolve` 确实早于 `agent/created`；下一步按 13.4.3 动态挂载工具（需要引入工具包依赖与生命周期管理）。
+
+**生效**：
+
+- `index.js`/`preset.js` 是 Host/预设半变化，必须重启 DSH；刷新页面只更新 Client 半。
+- 按工作区规则第 8 条，实施并验证后提示用户重启，不尝试 workaround。

@@ -1,10 +1,11 @@
 /**
  * Host-half contract probe for the chat-mode bundle.
  *
- * The Host row itself is intentionally empty; what this bundle promises is its
- * Agent preset declaration and the preset-scope plugin behind it. The probe
- * therefore checks the contract the Loader and the roster depend on: the entry
- * id, the patch shape, the preset identity, and the restricted composition.
+ * The Host row owns the early session-level permission pin; the preset-scope
+ * plugin owns the Agent-level permission shadow, tool restrictions, projection,
+ * and commands. The probe checks the entry id, the patch shape, the preset
+ * identity, the restricted composition, and the early pin's fresh/seeded/switch
+ * branches.
  *
  * @module scripts/host-contract
  */
@@ -24,6 +25,7 @@ export async function probeHost({ root, patchId, check }) {
   check('exports apply()', typeof mod.apply === 'function')
   check('ENTRY_ID is the bundle patch id', mod.ENTRY_ID === 'dsh-chat-mode', JSON.stringify(mod.ENTRY_ID))
   check('ENTRY_ID matches the supplied patch id', patchId === '' || mod.ENTRY_ID === patchId, `${mod.ENTRY_ID} vs ${patchId}`)
+  check('Host half injects permissionPresets', Array.isArray(mod.inject) && mod.inject.includes('permissionPresets'), JSON.stringify(mod.inject))
 
   const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
   check('patch inserts the Host row', patch.includes("id: dsh-chat-mode") && patch.includes("@local/dsh-chat-mode"))
@@ -41,6 +43,44 @@ export async function probeHost({ root, patchId, check }) {
   check('preset half exports apply()', typeof preset.apply === 'function')
   check('preset half injects its required services', Array.isArray(preset.inject)
     && ['sessionProjections', 'permissionPresets', 'agents'].every(name => preset.inject.includes(name)), JSON.stringify(preset.inject))
+
+  // Early session-level pin: fresh Chat → read-only; seeded Chat → untouched;
+  // switching a blank session to Chat → read-only.
+  const calls = []
+  const handlers = new Map()
+  const ctx = {
+    permissionPresets: {
+      current: () => 'workspace-write',
+      set: (session, name) => { calls.push([session, name]) },
+    },
+    logger: { warn() {} },
+    on(event, handler) {
+      handlers.set(event, handler)
+      return () => {}
+    },
+  }
+  mod.apply(ctx)
+  check('Host half listens for session/created', typeof handlers.get('session/created') === 'function')
+  check('Host half listens for session/event', typeof handlers.get('session/event') === 'function')
+  const flush = () => new Promise(resolve => queueMicrotask(resolve))
+  const fresh = { header: { agentPreset: 'chat', isSeeded: false } }
+  handlers.get('session/created')(fresh)
+  await flush()
+  check('fresh chat session is pinned read-only', calls.length === 1 && calls[0][1] === 'read-only', JSON.stringify(calls))
+  calls.length = 0
+  const seeded = { header: { agentPreset: 'chat', isSeeded: true } }
+  handlers.get('session/created')(seeded)
+  await flush()
+  check('seeded chat session is not repinned', calls.length === 0, JSON.stringify(calls))
+  calls.length = 0
+  const switched = { header: { agentPreset: 'ptc', isSeeded: false } }
+  handlers.get('session/event')(switched, { type: 'agent-preset/selected', data: { agentPreset: 'chat' } })
+  await flush()
+  check('a blank session switched to chat is pinned read-only', calls.length === 1 && calls[0][1] === 'read-only', JSON.stringify(calls))
+  calls.length = 0
+  handlers.get('session/event')(fresh, { type: 'agent-preset/selected', data: { agentPreset: 'standard' } })
+  await flush()
+  check('a non-chat selection is not pinned', calls.length === 0, JSON.stringify(calls))
 
   const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
   check('exports the preset subpath', manifest.exports?.['./preset'] === './preset.js')

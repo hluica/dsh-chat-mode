@@ -166,10 +166,14 @@ export async function apply(ctx) {
     const session = agent.session
     let entry = agents.get(session)
     if (entry === undefined) {
-      entry = { known: undefined, dispose: undefined, key: '' }
+      entry = { agent, known: undefined, dispose: undefined, key: '' }
       agents.set(session, entry)
+    } else {
+      entry.agent = agent
     }
-    if (entry.known === undefined) {
+    // Recompute an empty list: the first `agent/created` may run before the
+    // preset's tool plugins have registered, and `tools/change` retries.
+    if (entry.known === undefined || entry.known.length === 0) {
       const candidates = [shellToolName(), 'web_search']
       entry.known = candidates.filter((tool) => {
         try {
@@ -291,7 +295,7 @@ export async function apply(ctx) {
       // and restriction state simply stays at the composition defaults.
       warn(`chat-mode: initialization failed: ${error instanceof Error ? error.message : String(error)}`)
     }
-  })
+  }, { prepend: true })
 
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     // Fallback for a composition where the creation event did not reach the
@@ -302,6 +306,14 @@ export async function apply(ctx) {
         initializeAgent(agent, undefined)
       } catch (error) {
         warn(`chat-mode: lazy initialization failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    } else {
+      // Keep the registry restriction fresh. Note the loop resolves the tool
+      // set before this waterfall, so this only affects later steps.
+      try {
+        applyRestrictions(agent, stateOf(agent.session))
+      } catch (error) {
+        warn(`chat-mode: pre-step restriction failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     const decision = await next()
@@ -314,6 +326,20 @@ export async function apply(ctx) {
       warn(`chat-mode: failed to append chat tools at step start: ${error instanceof Error ? error.message : String(error)}`)
     }
     return decision
+  })
+
+  // A tool registration can land after `agent/created` (or a preset reload can
+  // replace the tool set). Re-apply the current per-Agent mask whenever the
+  // registry changes; `applyRestrictions` deduplicates by its key, so the
+  // `tools/change` emitted by our own restrict() terminates immediately.
+  ctx.on('tools/change', () => {
+    for (const [session, entry] of agents) {
+      try {
+        applyRestrictions(entry.agent, stateOf(session))
+      } catch (error) {
+        warn(`chat-mode: tools/change restriction failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
   })
 
   // Defense in depth: a batch resolved before a restriction change can still
