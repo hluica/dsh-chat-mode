@@ -2,7 +2,7 @@
 
 最后实质性修改于Harness版本：0.2.2-rc.3
 
-在 DSH 中新增一个以纯对话为主的 Agent 预设 **Chat**（preset id：`chat`）：默认只进行文字对话，文件读取需要用户明确要求；命令执行与联网搜索默认隐藏，由用户在输入框左侧的“对话设置”中显式启用；权限只允许“仅可查看”和“工作区内修改”，不允许选择“完全权限”。
+在 DSH 中新增一个以纯对话为主的 Agent 预设 **Chat**（preset id：`chat`）：默认只进行文字对话，文件读取需要用户明确要求；持久终端与联网搜索默认隐藏，由用户在输入框左侧的“对话设置”中显式启用；权限只允许“仅可查看”和“工作区内修改”，不允许选择“完全权限”。
 
 ## 使用与效果
 
@@ -23,13 +23,17 @@ Chat 会话的输入框左侧会出现两个紧凑下拉框：
 | 控件 | 可选值 | 效果 |
 | --- | --- | --- |
 | 权限 | 仅可查看 / 工作区内修改 | 提交 `/permission read-only` 或 `/permission workspace-write`；不提供完全权限。 |
-| 工具 | 全部关闭 / 命令执行 / 联网搜索 / 命令 + 联网 | 提交 `/chat-tools mode ...`；`命令执行` 会显示 `bash`（Windows 为 `pwsh`），`联网搜索` 会显示 `web_search`。 |
+| 工具 | 持久终端 / 联网搜索（可多选） | 勾选任意一项即提交 `/chat-tools shell on` 或 `/chat-tools search on`；再点一次取消。两项都不勾选即全部关闭。 |
+
+工具下拉框是**多选菜单**：菜单保持打开，可以连续勾选两项；每项带图标与 check 标记，触发器显示当前组合（关闭 / 持久终端 / 联网搜索 / 持久终端 + 联网）。未来增加工具时，客户端只需在 `TOOL_ITEMS` 表中增加一个菜单项。
 
 默认状态：
 
 - 权限：新 Chat 会话固定为 **仅可查看**；恢复的 Chat 会话保留已保存的 `read-only` / `workspace-write`，若发现更宽权限则纠正为 `read-only`。
-- 工具：**全部关闭**，即 `bash`/`pwsh` 与 `web_search` 不出现在模型工具列表中。
+- 工具：两项都**不勾选**，即 `bash`/`pwsh` 与 `web_search` 不出现在模型工具列表中。
 - `read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question` 始终可用，但由 system prompt 约束为“只在用户明确要求时使用”。
+
+两个下拉框的外观使用宿主主题 token：带权限/终端/联网图标、胶囊式触发器、hover / focus-visible / active / disabled 状态，以及展开时旋转的 chevron；亮/暗主题自动适配。工具菜单与权限菜单都复用 shipped `Menu` 的 portal、键盘与焦点行为。
 
 ### 权限与一次性授权
 
@@ -83,6 +87,9 @@ preset-chat (id: chat, name: Chat, order: 5)
 
 - 在 `conversation.input.left` 注册 `chat-mode-controls`，只在 `agentPreset === 'chat'` 时渲染。
 - 使用 shipped `Menu` 组件与主题 token，弹出层 portal 到 body，避免 composer 裁剪。
+- 工具菜单使用 `Menu` 的 `selectedIds` + `selection: 'check'` 多选模式；item 点击只回调 `onSelect`，父组件保持 `open`，因此可以连续勾选。`TOOL_ITEMS` 是数据表，未来工具只需增加一项。
+- 工具状态使用乐观 `pendingTools`：勾选立即更新 check 标记与触发器标签，等 `chatMode` 投影追上后清除；命令失败时回滚。
+- 权限菜单使用 `selectedId` 单选；两个菜单的 item 都带图标，触发器使用主题 token 的胶囊样式。
 - 权限与工具下拉框都通过 `session.command()` 提交，执行路径与 shipped 控件一致。
 - 中英文文案由 Client locale 的 `chatMode` 命名空间提供。
 
@@ -103,7 +110,7 @@ node build-system/sync.mjs dsh-chat-mode   # 同步 scripts/（仅首次或构�
 cd dsh-chat-mode
 npm run build                              # 构建 + verify
 npm run verify                             # 单独验证
-npm test                                   # preset.js 逻辑测试
+npm test                                   # preset 与 client 逻辑测试
 ```
 
 `npm run build` 会清理 macOS sidecar（`.DS_Store`）并检查：
@@ -150,7 +157,7 @@ plugin_manager install_bundle
 - 浏览器控制台若提示 `@local/dsh-chat-mode` 模块加载失败，检查 `client.js` 是否可解析、`dsh.client.inject` 是否列出了 `@deepseek-ai/dsh-client-ui-primitives` 等包。
 - 非 Chat 会话不显示该控件；这是设计行为。
 
-**工具下拉框切到“命令执行”后模型仍没有 bash**
+**工具菜单勾选“持久终端”后模型仍没有 bash**
 
 - 确认当前会话是 Chat，且 `chatMode` 投影已更新（切换后通常下一次 step 生效）。
 - 若在模型运行中切换，选择会在下一个 accepted pre-step 写入；工具 schema 可能要到下一轮才出现。
@@ -158,7 +165,7 @@ plugin_manager install_bundle
 
 **权限下拉框选“工作区内修改”后仍无法写文件**
 
-- Chat 模式没有 `write`/`edit`/`apply_patch`；只能通过启用“命令执行”后用 shell 在工作区内写。
+- Chat 模式没有 `write`/`edit`/`apply_patch`；只能通过勾选“持久终端”后用 shell 在工作区内写。
 - `read-only` 下 shell 写操作会被 sandbox 拒绝，并给出 escalation 提示；切到 `workspace-write` 或批准一次性权限后才可写。
 - 确认批准策略为 `ask`（`read-only` / `workspace-write` 的 shipped 配置都是 `ask`）。
 
@@ -179,6 +186,7 @@ plugin_manager install_bundle
 
 | 项目 | 值 |
 | --- | --- |
+| 插件版本 | `1.1.0` |
 | 包名 | `@local/dsh-chat-mode` |
 | Loader entry id | `dsh-chat-mode` |
 | preset id | `chat` |
@@ -188,6 +196,7 @@ plugin_manager install_bundle
 | 会话事件 | `chat-mode/tools` |
 | 权限命令 | `/permission read-only\|workspace-write`（Agent 作用域 shadow） |
 | 工具命令 | `/chat-tools [mode off\|shell\|search\|both] [shell on\|off] [search on\|off]` |
+| 工具菜单项 | `shell`（持久终端）、`search`（联网搜索），多选 |
 | 客户端 slot | `conversation.input.left` / id `chat-mode-controls` |
 | locale 命名空间 | `chatMode` |
 

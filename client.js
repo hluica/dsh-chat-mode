@@ -4,10 +4,14 @@
  * It adds two compact dropdowns to the composer tool row for sessions that
  * selected the `chat` Agent preset:
  *
- * - Permission: read-only / workspace-write. The Agent-scoped `/permission`
- *   command in `preset.js` is the authority; the shipped permission control is
- *   hidden for chat sessions so "Full access" is not offered here.
- * - Tools: off / shell / web search / both. Each pick writes `/chat-tools`.
+ * - Permission: read-only / workspace-write (single select). The Agent-scoped
+ *   `/permission` command in `preset.js` is the authority; the shipped
+ *   permission control is hidden for chat sessions so "Full access" is not
+ *   offered here.
+ * - Tools: a multi-select menu with two items, “持久终端” and “联网搜索”.
+ *   Checking either one enables that tool; checking both enables both. The
+ *   menu stays open while toggling, and `TOOL_ITEMS` is data-driven so future
+ *   tools can be added without rewriting the control.
  *
  * The body-level `data-dsh-chat-mode` attribute scopes the stylesheet rule that
  * hides the shipped permission seat; non-chat sessions never see it.
@@ -21,9 +25,24 @@ window.__ModuleLoader__.load({
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     const Menu = primitives.Menu
     const Chevron = primitives.IconChevronDownOutlineRegular
+    const ReadOnlyIcon = primitives.PermissionIconReadOnlyRegular
+    const WorkspaceIcon = primitives.PermissionIconWorkspaceWriteRegular
+    const ShellIcon = primitives.IconCodeOutlineRegular
+    const WebIcon = primitives.IconGlobeOutlineRegular
+    const ToolsIcon = primitives.IconSlidersTwoOutlineRegular
 
     /** Locale dictionary namespace owned by this plugin. */
     const NS = 'chatMode'
+
+    /**
+     * The tools menu is one data table: adding a future tool means adding one
+     * entry here plus its state field, Host gate, and command branch. The
+     * trigger and multi-select logic stay unchanged.
+     */
+    const TOOL_ITEMS = [
+      { id: 'shell', stateKey: 'shell', labelKey: 'tools.shell', icon: ShellIcon },
+      { id: 'search', stateKey: 'webSearch', labelKey: 'tools.search', icon: WebIcon },
+    ]
 
     /** Chinese copy for the two dropdowns. */
     const zh = {
@@ -34,10 +53,10 @@ window.__ModuleLoader__.load({
       'permission.title': '选择对话模式的权限',
       'tools.trigger': '工具：{value}',
       'tools.off': '全部关闭',
-      'tools.shell': '命令执行',
+      'tools.shell': '持久终端',
       'tools.search': '联网搜索',
-      'tools.both': '命令 + 联网',
-      'tools.title': '启用或关闭对话模式的高级工具',
+      'tools.both': '持久终端 + 联网',
+      'tools.title': '启用或关闭对话模式的高级工具（可多选）',
     }
 
     /** English copy for the two dropdowns. */
@@ -49,66 +68,105 @@ window.__ModuleLoader__.load({
       'permission.title': 'Choose the chat-mode permission',
       'tools.trigger': 'Tools: {value}',
       'tools.off': 'Off',
-      'tools.shell': 'Shell',
+      'tools.shell': 'Persistent shell',
       'tools.search': 'Web search',
       'tools.both': 'Shell + Web',
-      'tools.title': 'Enable or disable chat-mode advanced tools',
+      'tools.title': 'Enable or disable chat-mode advanced tools (multi-select)',
     }
 
     /**
-     * Hide only the shipped current-session permission control, and only while
-     * a chat session is rendered. The `data-slot` anchor is the renderer's
-     * stable slot wrapper; if a future DSH version renames it, the Host-side
-     * `/permission` shadow still refuses full access.
+     * Trigger and menu-item styling. All colors come from the host theme
+     * tokens; the shipped `Menu` owns the popup surface, so only our trigger
+     * and the item icons/checks are styled here. The final rule keeps hiding
+     * the shipped current-session permission seat for chat sessions.
      */
-    const STYLE_TEXT = 'body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"]{display:none !important}'
+    const STYLE_TEXT = `
+.dsh-chat-controls { display: inline-flex; align-items: center; gap: 6px; }
+.dsh-chat-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  max-width: 190px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 65%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 24px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.dsh-chat-trigger:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dsh-chat-trigger:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+.dsh-chat-trigger[data-active="true"] {
+  color: var(--dsw-alias-brand-primary);
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 55%, var(--dsw-alias-border-l1));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 8%, transparent);
+}
+.dsh-chat-trigger:disabled { cursor: default; opacity: 0.55; }
+.dsh-chat-trigger-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  opacity: 0.9;
+}
+.dsh-chat-trigger-icon > svg { display: block; width: 14px; height: 14px; }
+.dsh-chat-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-chat-trigger-chevron {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  opacity: 0.55;
+  transition: transform 120ms ease;
+}
+.dsh-chat-trigger-chevron > svg { display: block; width: 12px; height: 12px; }
+.dsh-chat-trigger[aria-expanded="true"] .dsh-chat-trigger-chevron { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-chat-trigger, .dsh-chat-trigger-chevron { transition: none; }
+}
+body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { display: none !important; }
+`
 
-    /** Compact trigger shared by both dropdowns. */
-    const TRIGGER_STYLE = {
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 4,
-      height: 24,
-      maxWidth: 180,
-      padding: '0 6px',
-      border: '1px solid var(--dsw-alias-border-l1)',
-      borderRadius: 6,
-      background: 'transparent',
-      color: 'var(--dsw-alias-label-secondary)',
-      font: 'inherit',
-      fontSize: 12,
-      lineHeight: '22px',
-      cursor: 'pointer',
-      whiteSpace: 'nowrap',
-    }
-
-    /** Theme-colored trigger for an active advanced-tool choice. */
-    const ACTIVE_TRIGGER_STYLE = {
-      ...TRIGGER_STYLE,
-      color: 'var(--dsw-alias-brand-primary)',
-      borderColor: 'var(--dsw-alias-brand-primary)',
+    /** Render one icon component, tolerating a missing export in another DSH build. */
+    function renderIcon(Component) {
+      return Component === undefined ? undefined : h(Component)
     }
 
     /** Render one dropdown trigger button. */
-    function trigger(label, title, open, disabled, onClick, active) {
+    function trigger({ label, title, open, disabled, active, icon: iconComponent, onClick }) {
       return h('button', {
         type: 'button',
+        className: 'dsh-chat-trigger',
         disabled,
         title,
         'aria-label': title,
-        'aria-expanded': open,
+        'aria-expanded': open ? 'true' : 'false',
+        ...(active ? { 'data-active': 'true' } : {}),
         onClick,
-        style: {
-          ...(active ? ACTIVE_TRIGGER_STYLE : TRIGGER_STYLE),
-          ...(disabled ? { cursor: 'default', opacity: 0.55 } : {}),
-        },
       },
-        h('span', {
-          style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-        }, label),
-        Chevron === undefined
-          ? h('span', { style: { fontSize: 10, opacity: 0.7 } }, '▾')
-          : h('span', { style: { display: 'inline-flex', width: 12, height: 12, opacity: 0.7 } }, h(Chevron)),
+        iconComponent === undefined
+          ? null
+          : h('span', { className: 'dsh-chat-trigger-icon', 'aria-hidden': true }, h(iconComponent)),
+        h('span', { className: 'dsh-chat-trigger-label' }, label),
+        h('span', { className: 'dsh-chat-trigger-chevron', 'aria-hidden': true },
+          Chevron === undefined ? '▾' : h(Chevron)),
       )
     }
 
@@ -123,6 +181,7 @@ window.__ModuleLoader__.load({
       const isChat = preset === 'chat'
       const [permissionOpen, setPermissionOpen] = useState(false)
       const [toolsOpen, setToolsOpen] = useState(false)
+      const [pendingTools, setPendingTools] = useState(null)
 
       // Hide the shipped permission control only while a chat session is active.
       useEffect(() => {
@@ -130,6 +189,19 @@ window.__ModuleLoader__.load({
         else delete document.body.dataset.dshChatMode
         return () => { delete document.body.dataset.dshChatMode }
       }, [isChat])
+
+      const liveTools = tools === undefined
+        ? { shell: false, webSearch: false }
+        : { shell: tools.shell === true, webSearch: tools.webSearch === true }
+      const effectiveTools = pendingTools ?? liveTools
+
+      // Keep the optimistic selection until the durable projection catches up.
+      useEffect(() => {
+        if (pendingTools === null) return
+        if (pendingTools.shell === liveTools.shell && pendingTools.webSearch === liveTools.webSearch) {
+          setPendingTools(null)
+        }
+      }, [pendingTools, liveTools.shell, liveTools.webSearch])
 
       if (!isChat) return null
 
@@ -139,38 +211,43 @@ window.__ModuleLoader__.load({
         : permissionValue === 'workspace-write'
           ? t('permission.workspaceWrite')
           : (permissionValue ?? t('permission.unavailable'))
+      const permissionIcon = permissionValue === 'read-only'
+        ? ReadOnlyIcon
+        : permissionValue === 'workspace-write'
+          ? WorkspaceIcon
+          : undefined
       const permissionItems = [
-        { id: 'read-only', label: t('permission.readOnly') },
-        { id: 'workspace-write', label: t('permission.workspaceWrite') },
+        { id: 'read-only', label: t('permission.readOnly'), ...(ReadOnlyIcon ? { icon: h(ReadOnlyIcon) } : {}) },
+        { id: 'workspace-write', label: t('permission.workspaceWrite'), ...(WorkspaceIcon ? { icon: h(WorkspaceIcon) } : {}) },
       ]
 
-      const toolsValue = tools === undefined
+      const selectedTools = TOOL_ITEMS
+        .filter(item => effectiveTools[item.stateKey] === true)
+        .map(item => item.id)
+      const toolsValue = selectedTools.length === 0
         ? 'off'
-        : tools.shell && tools.webSearch
+        : effectiveTools.shell && effectiveTools.webSearch
           ? 'both'
-          : tools.shell
+          : effectiveTools.shell
             ? 'shell'
-            : tools.webSearch
-              ? 'search'
-              : 'off'
+            : 'search'
+      const toolsItems = TOOL_ITEMS.map(item => ({
+        id: item.id,
+        label: t(item.labelKey),
+        ...(item.icon ? { icon: h(item.icon) } : {}),
+      }))
       const toolsLabel = t(`tools.${toolsValue}`)
-      const toolsItems = [
-        { id: 'off', label: t('tools.off') },
-        { id: 'shell', label: t('tools.shell') },
-        { id: 'search', label: t('tools.search') },
-        { id: 'both', label: t('tools.both') },
-      ]
+      const toolsActive = selectedTools.length > 0
 
-      const disabled = locked === true || selection === undefined
-      const toolsActive = toolsValue !== 'off'
+      const permissionDisabled = locked === true || selection === undefined
+      const toolsDisabled = locked === true
 
-      return h('span', {
-        style: { display: 'inline-flex', alignItems: 'center', gap: 6 },
-      },
+      return h('span', { className: 'dsh-chat-controls' },
         h(Menu, {
           open: permissionOpen,
           items: permissionItems,
           selectedId: permissionValue,
+          selection: 'check',
           onSelect: (id) => {
             setPermissionOpen(false)
             if (id !== permissionValue) void runCommand(`/permission ${id}`)
@@ -178,34 +255,43 @@ window.__ModuleLoader__.load({
           onClose: () => { setPermissionOpen(false) },
           side: 'top',
           portal: true,
-          anchor: trigger(
-            t('permission.trigger', { value: permissionLabel }),
-            t('permission.title'),
-            permissionOpen,
-            disabled,
-            () => { if (!disabled) setPermissionOpen(!permissionOpen) },
-            false,
-          ),
+          anchor: trigger({
+            label: t('permission.trigger', { value: permissionLabel }),
+            title: t('permission.title'),
+            open: permissionOpen,
+            disabled: permissionDisabled,
+            active: false,
+            icon: permissionIcon,
+            onClick: () => { if (!permissionDisabled) setPermissionOpen(!permissionOpen) },
+          }),
         }),
         h(Menu, {
           open: toolsOpen,
           items: toolsItems,
-          selectedId: toolsValue,
+          selectedIds: selectedTools,
+          selection: 'check',
           onSelect: (id) => {
-            setToolsOpen(false)
-            if (id !== toolsValue) void runCommand(`/chat-tools mode ${id}`)
+            // Multi-select: keep the menu open and toggle one item.
+            const item = TOOL_ITEMS.find(entry => entry.id === id)
+            if (item === undefined) return
+            const next = { shell: effectiveTools.shell, webSearch: effectiveTools.webSearch }
+            next[item.stateKey] = !next[item.stateKey]
+            setPendingTools(next)
+            void runCommand(`/chat-tools ${item.id} ${next[item.stateKey] ? 'on' : 'off'}`)
+              .then((ok) => { if (!ok) setPendingTools(null) })
           },
           onClose: () => { setToolsOpen(false) },
           side: 'top',
           portal: true,
-          anchor: trigger(
-            t('tools.trigger', { value: toolsLabel }),
-            t('tools.title'),
-            toolsOpen,
-            locked === true,
-            () => { if (locked !== true) setToolsOpen(!toolsOpen) },
-            toolsActive,
-          ),
+          anchor: trigger({
+            label: t('tools.trigger', { value: toolsLabel }),
+            title: t('tools.title'),
+            open: toolsOpen,
+            disabled: toolsDisabled,
+            active: toolsActive,
+            icon: ToolsIcon,
+            onClick: () => { if (!toolsDisabled) setToolsOpen(!toolsOpen) },
+          }),
         }),
       )
     }

@@ -2,7 +2,7 @@
 
 - **Harness 版本**：`0.2.2-rc.3`（`DSH_INSTALL_DIR/package.json` 为 `@deepseek-ai/dsh@0.2.2-rc.3`）
 - **工作区**：`/Users/hanluica/Documents/deepseek-harness/local-plugins/dsh-chat-mode`
-- **状态**：已实施并完成 Host 端集成验证（插件 `1.0.0`，2026-11-17）；客户端视觉验收待用户新建 Chat 会话确认
+- **状态**：`1.0.0` 已实施并完成 Host 端集成验证（2026-11-17）；`1.1.0` 工具多选菜单与下拉框外观优化已实施并通过构建/逻辑测试（2026-11-17），客户端视觉验收待用户刷新页面后新建/打开 Chat 会话确认。
 - **文档日期**：2026-11-17
 
 ---
@@ -1252,3 +1252,226 @@ ctx.inject(['commands'], (commandCtx) => {
 - 若需要彻底移除 slash picker 的完全权限行，可替换 shipped `ui-permission-presets` 客户端插件（成本较高）。
 - 若希望进一步收紧 Host 级 `team_task_*` / `working_directory`，可在 Chat Agent 作用域追加 `restrict()`。
 - 若实测 `complete: true` 抑制 tool guidance 影响体验，可改为 `complete: false` + 更克制的 chat prefix。
+
+---
+
+## 十一、工具多选菜单与下拉框外观优化（2026-11-17）
+
+### 11.1 目的与范围
+
+本轮只改客户端控件，不改 Host 半、preset 组合、权限锁与工具 gate：
+
+1. 把“工具”从 **单选四模式**（全部关闭 / 命令执行 / 联网搜索 / 命令 + 联网）改为 **多选菜单**，只保留两个菜单项：
+   - **持久终端**（对应 `chatMode.shell`，模型工具 `bash` / `pwsh`）；
+   - **联网搜索**（对应 `chatMode.webSearch`，模型工具 `web_search`）。
+   - 勾选任意一项即启用该工具，可同时勾选；两项都不勾选即全部关闭。
+   - 菜单是数据驱动的（`TOOL_ITEMS` 数组），为未来增加工具留出扩展位。
+2. 优化两个下拉框的外观：
+   - 工具菜单项与触发器增加图标；
+   - 权限菜单项与触发器增加图标；
+   - 触发器改为带主题 token 的胶囊式按钮，增加 hover / focus-visible / active / disabled 状态与 chevron 旋转；
+   - 保留 `portal` 弹出层与 shipped `Menu` 的键盘/焦点行为。
+
+### 11.2 可行性
+
+#### 11.2.1 `Menu` 原生支持多选
+
+前端 primitives 的 `Menu` 组件（压缩 bundle 中的 `zp`）的 props 包含：
+
+```text
+selectedId, selectedIds, selection = 'check', items, onSelect, onClose,
+anchor, align, side, portal, dense, compact, autoFocus, footer, ...
+```
+
+其中 item 的选中判断为：
+
+```text
+selected: item.id === selectedId || selectedIds?.includes(item.id) === true
+selection: selection
+```
+
+`MenuItemButton`（`Zu`）在 `selected && selection === 'check'` 时渲染 check 图标，`selection === 'fill'` 时使用填充式选中样式。默认 `selection: 'check'`，正是多选需要的勾选样式。
+
+**关键行为**：item 的 `onClick` 只调用 `onSelect(item.id)`，不会自动调用 `onClose`；`Menu` 的关闭由父组件的 `open` 状态或外部点击/取消控制。因此：
+
+- 工具菜单传入 `selectedIds`，`onSelect` 切换对应状态并保持 `open: true`，菜单不会关闭，可以连续勾选两项。
+- 权限菜单继续使用 `selectedId`，`onSelect` 后主动 `setPermissionOpen(false)`。
+
+**证据**：
+
+- `dsh-web-frontend/dist/assets/index-Ciz7DZxv.js` 中 `function zp({...})` 的 `selectedIds` / `selection` / item 渲染逻辑；
+- 同一 bundle 的 primitives 导出表包含 `Menu`、`MenuItemButton`、`MenuSurface`、`MENU_TRANSITION_MS`。
+
+#### 11.2.2 可用图标
+
+primitives 导出表中确认存在：
+
+| 用途 | 图标导出 |
+| --- | --- |
+| 权限：仅可查看 | `PermissionIconReadOnlyRegular` |
+| 权限：工作区内修改 | `PermissionIconWorkspaceWriteRegular` |
+| 工具：持久终端 | `IconCodeOutlineRegular`（现有图标集中没有专用 terminal outline；code 图标最接近，也可用 `PluginArtworkTerminal`，但它更适合插件详情页） |
+| 工具：联网搜索 | `IconGlobeOutlineRegular`（语义为网络/全球；`IconSearchOutlineRegular` 也可，作为备选） |
+| 工具触发器 | `IconSlidersTwoOutlineRegular` |
+| chevron | `IconChevronDownOutlineRegular` |
+
+所有图标都通过 `require('@deepseek-ai/dsh-client-ui-primitives')` 获取，沿用 shipped `PermissionSelect` 的图标用法；`Menu` item 的 `icon` prop 直接接收 ReactNode。
+
+#### 11.2.3 命令与状态不需要改动
+
+现有 `/chat-tools` 命令已支持：
+
+```text
+/chat-tools shell on|off
+/chat-tools search on|off
+/chat-tools mode off|shell|search|both
+```
+
+多选菜单的每一项切换只需提交对应的 `shell on|off` 或 `search on|off`；`chatMode` 投影的 `{ shell, webSearch }` 保持不变，Host 端 restriction / guard 也不需要改动。
+
+#### 11.2.4 外观实现
+
+客户端已注入一个 `<style>`；本轮在同一段样式中增加 `dsh-chat-` 前缀的类：
+
+- `.dsh-chat-controls`：两个触发器的 flex 容器；
+- `.dsh-chat-trigger`：胶囊式触发器，使用 `--dsw-alias-bg-layer-1` / `--dsw-alias-border-l1` / `--dsw-alias-label-secondary`；
+- `:hover`：`--dsw-alias-bg-layer-2` / `--dsw-alias-border-l2` / `--dsw-alias-label-primary`；
+- `:focus-visible`：`--dsw-alias-brand-primary` outline；
+- `[data-active="true"]`：品牌色描边/浅色底，用于“有工具被启用”的状态；
+- `:disabled`：降低透明度；
+- `.dsh-chat-trigger-icon` / `-label` / `-chevron`：图标 14px、标签省略、chevron 12px；
+- `[aria-expanded="true"] .dsh-chat-trigger-chevron`：旋转 180°；
+- 继续保留 `body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { display:none !important }`。
+
+颜色使用主题 token，亮/暗主题自动适配；`color-mix` 与现有 `dsh-custom-css` 插件用法一致。可加 `@media (prefers-reduced-motion: reduce)` 关闭 transition。
+
+### 11.3 核心进路
+
+#### 11.3.1 客户端数据结构
+
+```js
+const TOOL_ITEMS = [
+  { id: 'shell',  stateKey: 'shell',     icon: IconCodeOutlineRegular,  labelKey: 'tools.shell' },
+  { id: 'search', stateKey: 'webSearch', icon: IconGlobeOutlineRegular, labelKey: 'tools.search' },
+]
+```
+
+- `selectedIds = TOOL_ITEMS.filter(item => effectiveTools[item.stateKey]).map(item => item.id)`。
+- `toolsItems = TOOL_ITEMS.map(item => ({ id: item.id, label: t(item.labelKey), icon: h(item.icon) }))`。
+- 未来新增工具：在 `TOOL_ITEMS` 增加一项、在 `chatMode` 状态/投影增加一个字段、在 Host 端增加对应的 gated tool 与 command 分支即可；触发器和多选逻辑不需要重写。
+
+#### 11.3.2 乐观更新
+
+工具菜单保持打开时，需要即时反馈：
+
+- 增加 `pendingTools` state；
+- `effectiveTools = pendingTools ?? tools ?? { shell:false, webSearch:false }`；
+- `onSelect(id)` 基于 `effectiveTools` 计算 next，`setPendingTools(next)`，提交 `/chat-tools <id> on|off`；
+- `useEffect` 在 `tools` 投影与 `pendingTools` 一致时清除 pending；
+- 命令失败时清除 pending。
+
+这样连续勾选两项时，第二项基于第一项的 pending 状态计算，不会互相覆盖；菜单 check 标记与 trigger 标签即时更新。
+
+#### 11.3.3 触发器
+
+- 权限：图标按当前值选择 `PermissionIconReadOnlyRegular` / `PermissionIconWorkspaceWriteRegular`；标签 `权限：<值>`；`data-active` 不使用。
+- 工具：图标固定 `IconSlidersTwoOutlineRegular`；标签按四项摘要 `工具：全部关闭 / 持久终端 / 联网搜索 / 持久终端 + 联网`；有任一工具启用时 `data-active="true"`。
+- 两者都保留 `aria-expanded`、`aria-label`、`title`、`disabled`。
+- chevron 用 `IconChevronDownOutlineRegular`；展开时旋转。
+
+#### 11.3.4 权限菜单
+
+权限菜单保持单选：
+
+- `items` 增加权限图标；
+- `selectedId` 仍为 `permissionValue`；
+- `onSelect` 关闭菜单并提交 `/permission <id>`；
+- 图标与 shipped 权限选择器保持一致。
+
+### 11.4 问题与解决办法
+
+| 问题 | 根因 | 修法 |
+| --- | --- | --- |
+| 多选菜单点一次就关闭 | 误以为 `Menu` 在 item click 时自行关闭 | 代码确认 `onSelect` 只回调父级；父级不把 `open` 设为 false，菜单保持打开。 |
+| 连续勾选时第二项覆盖第一项 | 直接用 `tools` 投影（尚未更新）计算 next | 用 `effectiveTools = pendingTools ?? tools` 计算，并在投影追上后清除 pending。 |
+| 图标不存在导致渲染报错 | 不同 DSH 版本的 primitives 导出可能变化 | 解构时做 `undefined` 检查，缺失时渲染无图标/文本 fallback；当前版本已确认导出存在。 |
+| 主题/暗色不适配 | 硬编码颜色 | 只使用 `--dsw-alias-*` token；用 `color-mix` 生成半透明底色。 |
+| 触发器与 shipped 权限控件风格冲突 | 原来的 inline style 是临时样式 | 改为 `dsh-chat-trigger` 类 + 主题 token；与 composer 其他控件保持一致的圆角/高度/字号。 |
+| 菜单弹层样式无法自定义 | `Menu` 的 popup 由 primitives 拥有 | 只自定义触发器和 item icon/check；弹层行高、hover、焦点保留 shipped 行为。 |
+| 未来工具扩展仍需改多处 | 当前 `chatMode` 状态是两个显式布尔 | 用 `TOOL_ITEMS` 数据驱动客户端；Host 端仍需增加状态字段、restriction/gate 与 command 分支，属于契约变化，需版本提升。 |
+
+### 11.5 备选方案
+
+| 方案 | 优点 | 缺点 | 结论 |
+| --- | --- | --- | --- |
+| `Menu` + `selectedIds`（本方案） | 复用 shipped 弹出层、键盘/焦点/portal；原生 check 多选；改动最小 | 弹层样式不能大改 | 采用 |
+| 自建 popover + 两个 checkbox | 外观完全可控 | 需自己处理 portal、键盘、焦点、外部点击；与 shipped UI 不一致 | 不采用 |
+| 两个独立 toggle chip | 无需菜单 | 不是“下拉框”，与用户要求不符；未来工具多时占空间 | 不采用 |
+| 保留单选四模式 | 改动最小 | 用户明确要求多选；未来工具组合爆炸 | 不采用 |
+
+### 11.6 版本与文档
+
+- 这是**客户端 UI 行为/契约变化**：工具选择从单选四模式变为多选两项。`package.json` 版本从 `1.0.0` 提升到 `1.1.0`。
+- README 的“工具”表、“默认状态”、“工具按需启用”、“版本契约”需要同步更新；README 首行的 Harness 版本声明保持 `0.2.2-rc.3`（Harness 版本未变）。
+- FEASIBILITY 本节记录设计；实施记录追加到本节或新增小节。
+
+### 11.7 验证与验收
+
+- `scripts/client-test.mjs`：
+  - 工具菜单 items 为 `['shell', 'search']`；
+  - `selectedIds` 在关闭/仅终端/仅联网/两者时的数组；
+  - 触发器包含图标、标签、chevron；
+  - 调用 `toolsMenu.props.onSelect('shell')` 提交 `/chat-tools shell on`；
+  - 权限菜单 items 仍为两项且带图标；
+  - 非 chat 会话仍返回 `null`。
+- `npm run build` / `npm run verify` 通过。
+- 手动 GUI 验收：
+  - 工具菜单打开后连续勾选两项，菜单不关闭，两项都出现 check；
+  - trigger 标签依次为“全部关闭 / 持久终端 / 联网搜索 / 持久终端 + 联网”；
+  - 权限菜单图标与当前值一致；
+  - 亮/暗主题、hover、focus-visible、disabled 状态正常；
+  - 页面刷新后控件与状态正常。
+- 本轮只改 `client.js`、`scripts/client-test.mjs`、`README.md`、`package.json` 版本；Host 半与 preset 不变，不需要重启 DSH，页面刷新即可加载新的 Client 模块。
+
+### 11.8 待确认的细节
+
+- 图标选择：持久终端使用 `IconCodeOutlineRegular`，联网搜索使用 `IconGlobeOutlineRegular`，工具触发器使用 `IconSlidersTwoOutlineRegular`。如果你更希望联网搜索用 `IconSearchOutlineRegular`，或持久终端使用 `PluginArtworkTerminal`，可在实施轮次调整。
+- 工具菜单是否需要额外的分组标题/说明文字？当前按“只有两个菜单项”的要求不加。
+
+
+### 11.9 实施记录（2026-11-17）
+
+**代码变化**：
+
+- `client.js`
+  - 工具菜单从四模式单选改为 `selectedIds` 多选，只保留 `shell`（持久终端）与 `search`（联网搜索）两项；
+  - `TOOL_ITEMS` 数据表驱动菜单项、图标与状态字段；未来新增工具只需增加一项；
+  - 工具 item 的 `onSelect` 不再关闭菜单，改为切换对应 `shell`/`webSearch` 并提交 `/chat-tools <id> on|off`；
+  - 新增 `pendingTools` 乐观状态：勾选立即更新 check 与触发器标签，`chatMode` 投影追上后自动清除，命令失败时回滚；
+  - 权限菜单保持 `selectedId` 单选，两个菜单的 item 增加图标；
+  - 触发器改为 `dsh-chat-trigger` 类 + 主题 token 的胶囊样式，增加 `IconCodeOutlineRegular`（持久终端）、`IconGlobeOutlineRegular`（联网搜索）、`IconSlidersTwoOutlineRegular`（工具触发器）、权限图标、chevron 旋转、hover/focus-visible/active/disabled 状态；
+  - 保留 `body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"]` 隐藏规则。
+- `scripts/client-test.mjs`
+  - 增加 primitives 图标 stub；
+  - 断言工具 items 为 `shell`/`search`，`selectedIds` 在关闭/仅终端/仅联网/两者时的数组；
+  - 断言工具/权限 item 与触发器带图标；
+  - 断言点击工具项提交 `/chat-tools shell on|off`、`/chat-tools search off`，且菜单不关闭；
+  - 断言权限项提交 `/permission workspace-write`；
+  - 保留非 chat 返回 `null` 的断言。
+- `package.json`：版本 `1.0.0` → `1.1.0`。
+- `README.md`：更新工具多选说明、默认状态、外观说明、故障排查、版本契约（`1.1.0`、工具菜单项）。
+
+**未变化**：`preset.js`、`cordis.patch.yml`、`index.js`、`scripts/test.mjs`、Host 端权限锁与工具 gate。`chatMode` 投影仍是 `{ shell, webSearch }`；`/chat-tools` 命令语法完全兼容。
+
+**验证**：
+
+- `npm test`：preset 逻辑测试 + client smoke test 全部通过；
+- `npm run build`：`verify · all checks passed`（含 Host 探针、目录/依赖/清单/构建系统检查）；
+- 客户端多选行为已通过 stub 测试验证：`Menu` item 点击保持打开、`selectedIds` 正确、命令字符串正确；
+- 由于只改 Client 半，不需要重启 DSH；页面刷新即可加载新的 `client.js`。
+- 视觉验收待用户在 Desktop GUI 中刷新后新建/打开 Chat 会话确认：工具菜单两项带图标与 check、可连续勾选、触发器标签与 active 样式、权限菜单图标、亮/暗主题、hover/focus 状态。
+
+**注意**：
+
+- Desktop profile 里安装的 bundle 版本元数据可能仍显示 `1.0.0`（link 包的 `package.json` 已改为 `1.1.0`；plugin manager 的已安装记录可能需要移除后重新安装才会刷新）。Client 模块本身从 link 路径读取，刷新页面即可拿到 `1.1.0` 的 `client.js`。
+- 若用户在 GUI 中看到旧的四模式菜单，说明浏览器仍缓存旧客户端模块；刷新页面或重新打开 GUI 即可。
