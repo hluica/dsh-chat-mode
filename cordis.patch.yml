@@ -9,7 +9,7 @@
       config:
         id: chat
         name: Chat
-        description: Conversation-first; reads files only when asked, with shell and web search opt-in.
+        description: 以纯对话为主；只在用户明确要求时读取文件，持久终端与联网搜索按需启用。
         order: 5
         plugins:
           - id: persona

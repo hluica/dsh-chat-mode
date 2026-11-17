@@ -1475,3 +1475,36 @@ const TOOL_ITEMS = [
 
 - Desktop profile 里安装的 bundle 版本元数据可能仍显示 `1.0.0`（link 包的 `package.json` 已改为 `1.1.0`；plugin manager 的已安装记录可能需要移除后重新安装才会刷新）。Client 模块本身从 link 路径读取，刷新页面即可拿到 `1.1.0` 的 `client.js`。
 - 若用户在 GUI 中看到旧的四模式菜单，说明浏览器仍缓存旧客户端模块；刷新页面或重新打开 GUI 即可。
+
+---
+
+## 十二、预设描述中文化（2026-11-17）
+
+### 12.1 目的与范围
+
+用户澄清：“预设显示名：英文 Chat”只针对 **名称**；预设的 **描述文本** 应为中文。把 `preset-chat` 的 `description` 从英文改为中文，名称仍为 `Chat`。
+
+### 12.2 变更
+
+`cordis.patch.yml`：
+
+```yaml
+config:
+  id: chat
+  name: Chat
+  description: 以纯对话为主；只在用户明确要求时读取文件，持久终端与联网搜索按需启用。
+```
+
+英文描述原文为 `Conversation-first; reads files only when asked, with shell and web search opt-in.`，语义保持不变。
+
+### 12.3 影响与版本
+
+- 仅显示文本变化，不影响 preset 组合、工具、权限锁或命令；`package.json` 保持 `1.1.0`。
+- README 未引用该描述原文，无需改动；版本契约中的 preset 显示名仍为 `Chat`。
+- `npm run build` 通过（`verify · all checks passed`）。
+
+### 12.4 生效方式
+
+预设声明来自 bundle patch，运行中的 Host 在启动时装载该声明；修改 `cordis.patch.yml` 后，**运行中的 Desktop Host 需要重启 DSH** 才会显示新的中文描述（或由插件管理器重新装载该 bundle）。这不是 Client 半的文件改动，刷新页面不会更新 Host 已装载的 preset 描述。
+
+按工作区规则第 8 条：需要重启才能生效时，停止后续工作并提示用户重启。本轮不尝试 workaround。
