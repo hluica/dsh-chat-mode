@@ -2,7 +2,7 @@
 
 - **Harness 版本**：`0.2.2-rc.3`（`DSH_INSTALL_DIR/package.json` 为 `@deepseek-ai/dsh@0.2.2-rc.3`）
 - **工作区**：`/Users/hanluica/Documents/deepseek-harness/local-plugins/dsh-chat-mode`
-- **状态**：`1.0.0` 已实施并完成 Host 端集成验证（2026-11-17）；`1.1.0` 工具多选菜单与下拉框外观优化已实施并通过构建/逻辑测试（2026-11-17），客户端视觉验收待用户刷新页面后新建/打开 Chat 会话确认。
+- **状态**：`1.0.0` 已实施并完成 Host 端集成验证（2026-11-17）；`1.1.0` 工具多选菜单与下拉框外观优化已实施并通过构建/逻辑测试（2026-11-17），客户端视觉验收待用户刷新页面后新建/打开 Chat 会话确认。2026-11-17 追加新 Chat 会话权限与首轮工具可见性修复设计（目标版本 `1.1.1`），待新轮次实施。
 - **文档日期**：2026-11-17
 
 ---
@@ -1508,3 +1508,159 @@ config:
 预设声明来自 bundle patch，运行中的 Host 在启动时装载该声明；修改 `cordis.patch.yml` 后，**运行中的 Desktop Host 需要重启 DSH** 才会显示新的中文描述（或由插件管理器重新装载该 bundle）。这不是 Client 半的文件改动，刷新页面不会更新 Host 已装载的 preset 描述。
 
 按工作区规则第 8 条：需要重启才能生效时，停止后续工作并提示用户重启。本轮不尝试 workaround。
+
+---
+
+## 十三、新 Chat 会话权限与首轮工具可见性修复（2026-11-17）
+
+### 13.1 现象
+
+用户重启 DSH 后新建 Chat 会话，观察到：
+
+1. 权限总是显示 **工作区内修改**，而不是设计的 `read-only`。
+2. 首轮对话的“可用工具”统计包含 `持久终端` / `联网搜索`，即使两项都未勾选；直到第二轮才显示工具已被移除。
+3. 尚未测试再次手动启用工具的结果。
+
+### 13.2 调查与证据
+
+#### 13.2.1 权限投影的默认值
+
+`@deepseek-ai/dsh-permission-presets` 的 `permissions` 投影：
+
+- `init: () => ({ ...EMPTY_KNOBS, seeded: false })`；
+- `derive(state)` 在没有任何 `permission/preset` / `sandbox/mode` / `approval/policy` 事件时，使用组合默认值：`ctx.shell.sandboxMode`（base 默认 `workspace-write`）与 `ctx.approval.config.policy`（`ask`）；
+- 因此一个**尚未创建 Agent / 尚未 pin 的空白 Chat 会话**，权限投影显示 `workspace-write`；
+- 真正的 pin 只发生在 `agent/created` 的 `pinInitialPermission`（全局服务，`prepend: true`）与我们的 preset 插件 `pinPermission`（普通 listener）。
+
+这解释了“打开新 Chat 对话后权限总是工作区内修改”的**空白会话阶段**：我们的 `read-only` pin 还没运行；客户端先读到了组合默认值。
+
+#### 13.2.2 首轮工具 set 的解析顺序
+
+`@deepseek-ai/dsh-agent-loop/src/agent.ts` 的 `preStep` 顺序是：
+
+```text
+line 298: const toolSet = await this.loopCtx.tools.resolve({ agent: this, modelSelection, signal })
+line 300: const assembly = await this.loopCtx.systemPrompt.assemble({ ... toolSet })
+line 303: await this.ctx.waterfall('agent/pre-step', ...)
+```
+
+也就是说 **工具集在 `agent/pre-step` 之前就已经 resolve**。我们在 `agent/pre-step` 里做的 lazy init / reapply 无法影响当前 step 的 toolSet；它只能影响后续 step。
+
+`@deepseek-ai/dsh-agent-loop/src/index.ts` 的 `initializeAgent`：
+
+- line 574 构造 `ReactLoopAgent`（机器已可处理 inbox）；
+- line 629 `agent.ctx.sessions.enter/announce`；
+- line 638 才 `agents.announce(agent, source)`，即触发 `agent/created`。
+
+因此，如果首个 prompt 在 `agent/created` 的 listener 之前/期间被处理，首轮 `tools.resolve` 会看到 preset 中已注册的 `bash` / `web_search`；我们的 `restrict()` 在 `agent/created`（或 `agent/pre-step`）才生效，于是**首轮包含、第二轮移除**。
+
+#### 13.2.3 `known` 缓存
+
+当前 `preset.js` 的 `applyRestrictions` 在首次调用时计算 `entry.known`（通过 `agent.ctx.tools.get(tool, agent)`）。如果首次调用时工具尚未注册，`known` 会缓存为空数组，之后不再重试；这会造成“第一次不限制、后续才限制”的另一条路径。
+
+#### 13.2.4 现有验证的盲区
+
+此前的 temp profile 集成探针只做了：
+
+```text
+createSession -> 立即读取 permission / tools.schemas
+```
+
+没有发送首个 prompt，因此无法暴露“工具在 `agent/created` 之前就 resolve”的时序问题；探针看到的 read-only 与 restricted tools 是创建完成后的状态，不等于**首轮请求**使用的状态。
+
+### 13.3 根因结论
+
+1. **权限**：空白 Chat 会话的 `permissions` 投影在 Agent/pin 之前使用组合默认 `workspace-write`；我们的 `read-only` pin 只在 `agent/created`，对“新会话界面/首轮”过晚。
+2. **工具**：首轮 `tools.resolve` 发生在 `agent/pre-step` 之前；`agent/created` 的普通 listener 可能晚于首个 prompt 的 resolve，导致首轮工具集包含 `bash`/`web_search`。`known` 空缓存会放大该问题。
+3. **现有实现没有在“preset 选择/会话创建”阶段做任何 Chat 专属的权限 pin**，因此空白会话一定先显示组合默认。
+
+### 13.4 修法（下一轮实施）
+
+#### 13.4.1 Host 半：在会话创建/预设选择时 pin
+
+`index.js`（Host 半）增加：
+
+```js
+export const inject = ['permissionPresets']
+
+export function apply(ctx) {
+  // Fresh chat sessions: pin read-only before any prompt/agent.
+  ctx.on('session/created', (session) => {
+    if (session.header.agentPreset !== 'chat') return
+    if (session.header.isSeeded === true) return // resumed/seeded sessions keep their choice
+    pin(ctx, session)
+  })
+  // Preset switched to chat while blank: pin read-only.
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'agent-preset/selected') return
+    if (event.data.agentPreset !== 'chat') return
+    if (session.header.isSeeded === true) return
+    pin(ctx, session)
+  })
+}
+
+function pin(ctx, session) {
+  try {
+    if (ctx.permissionPresets.current(session) !== 'read-only') {
+      ctx.permissionPresets.set(session, 'read-only')
+    }
+  } catch {
+    // The permission projection may not be ready; agent/created still retries.
+  }
+}
+```
+
+注意：
+
+- `session/created` 的 listener 是 `(session)`；`session/event` 是 `(session, event)`（与 `dsh-agent-preset-registry/src/index.ts` 的用法一致）。
+- `isSeeded` 用来避免把已恢复的 workspace-write Chat 会话重置为 read-only。
+- `session/created` 可能对恢复的会话也触发；`isSeeded` 与 `agent/created` 的 `source` 双重判断。
+- 该 pin 在 `permissionPresets` 的 `permissions` 投影已注册后生效；Host 激活顺序保证这一点。
+- 若 `set` 在 `session/created` 中重入有问题，可改为 `queueMicrotask`，但需在首个 prompt 之前完成。
+
+#### 13.4.2 preset 半：更早的 restriction
+
+`preset.js`：
+
+1. `ctx.on('agent/created', handler, { prepend: true })`，让 restriction/permission pin 排在普通 creation observer 之前。
+2. `applyRestrictions` 不缓存空 `known`：
+   ```js
+   if (entry.known === undefined || entry.known.length === 0) { ... recompute ... }
+   ```
+3. entry 保存 `agent` 引用，并注册 `ctx.on('tools/change', ...)`：当工具注册/限制变化时，对每个已知 Chat Agent 重新 `applyRestrictions`；用 `key` 去重避免递归。
+4. `agent/pre-step` 保留 lazy init/reapply，作为后续 step 的兜底；但明确它**不能**修复当前 step 的 toolSet（因为 resolve 在前）。
+
+#### 13.4.3 若首轮仍包含工具：动态挂载（备选）
+
+如果上述 prepend + tools/change 仍不能保证首轮（即首轮 toolSet 确实在 `agent/created` 之前 resolve），则采用更彻底的方案：
+
+- 从 preset 组合中**移除** `persistent-bash`/`persistent-pwsh` 与 `web_search` 的默认挂载；
+- 保留终端后端与 `web_fetch`；
+- 在 Chat preset 插件中按 Agent 的 `chatMode` 状态**动态挂载** gated 工具：`agent.ctx.plugin(...)`（bash/pwsh、web_search 的独立实例）；
+- 默认关闭时首轮完全没有这些工具；用户勾选后挂载，下一次 step 生效；
+- 代价：preset 插件需要 import `@deepseek-ai/dsh-tool-bash-persistent` / `@deepseek-ai/dsh-tool-pwsh-persistent` / `@deepseek-ai/dsh-tool-web`，引入运行时依赖与构建 pin；需评估子插件生命周期、dispose、resume 顺序。
+- 这是“保证首轮不可见”的唯一彻底方案；优先尝试 13.4.1/13.4.2 的低风险修复。
+
+#### 13.4.4 权限的另一种备选
+
+把 Chat 的 `persona`/预设默认权限改为 `read-only`（全局 `permission-presets` 的 `defaultPreset` 不能按 preset 设置）；不可取，会影响其他模式。Host `session/created` pin 是范围最小的方案。
+
+### 13.5 验证计划
+
+- **逻辑测试**：扩展 `scripts/test.mjs` / `client-test.mjs`，覆盖 `session/created` pin、`agent/created` prepend、`tools/change` reapply、空 `known` 重试。
+- **Host 集成**：temp profile 探针增加“创建 Chat 会话后、发送首个 prompt 前”的 permission/tools 检查；如可行，用 fake LLM adapter 发送首个 prompt 并检查首轮 `request/header` 的工具列表。
+- **GUI 验收**：
+  - 新建 Chat 会话，**未发送消息前**权限应为 `仅可查看`；
+  - 首轮工具列表不包含 `持久终端` / `联网搜索`；
+  - 第二轮仍不包含；
+  - 勾选 `持久终端` 后，下一轮出现 `bash`；取消后下一轮消失；
+  - 恢复一个已保存 `workspace-write` 的 Chat 会话，首轮不被重置为 read-only；
+  - `web_fetch` 始终可用。
+- **构建**：`npm run build` / `npm run verify`。
+- **版本**：bug fix，`1.1.0` → `1.1.1`；README 更新“默认权限/首轮工具”说明与故障排查。
+- **生效**：Host 半与 preset 插件变化需要重启 DSH；客户端半若有变化需刷新页面。实施后按规则 8 提示重启，不尝试 workaround。
+
+### 13.6 需要用户确认/协助
+
+- 若方便，请提供出问题的 Chat 会话 ID（或会话头/首轮 `request/header` 的工具列表），以便确认首轮实际请求是否包含 `bash`/`web_search`，而不只是统计面板的显示。
+- 若无法提供，按 13.4.1/13.4.2 先修复并验收；若首轮仍出现，再采用 13.4.3 的动态挂载方案。
