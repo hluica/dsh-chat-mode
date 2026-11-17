@@ -33,6 +33,7 @@ function harness(options = {}) {
   let turnOpen = openTurn
 
   const session = {
+    id: 's1',
     append(type, data) {
       events.push({ type, data })
       if (type === 'chat-mode/tools') logged = { shell: data.shell, webSearch: data.webSearch }
@@ -89,6 +90,11 @@ function harness(options = {}) {
     },
     agents: {
       turnBoundaryOf() { return { openTurnStartSeq: turnOpen ? 1 : null } },
+      get(id) { return id === session.id ? agent : undefined },
+    },
+    effect(callback) {
+      const cleanup = callback()
+      return () => { cleanup?.() }
     },
     on(event, handler, options) {
       handlers.set(event, handler)
@@ -149,7 +155,7 @@ function command(list, name) {
   assert.equal(h.restrictions.length, 1, 'one restriction should be installed')
   assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
   assert.ok(command(h.commands, 'chat-tools'), '/chat-tools should be registered in the preset scope')
-  assert.ok(command(h.agentCommands, 'permission'), '/permission should be registered on the Agent scope')
+  assert.ok(command(h.commands, 'permission'), '/permission should be registered in the preset scope')
 }
 
 // 2. Resumed Agent keeps an allowed permission; a wider one is corrected.
@@ -197,7 +203,7 @@ function command(list, name) {
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
-  const permission = command(h.agentCommands, 'permission')
+  const permission = command(h.commands, 'permission')
   const refused = permission.handler({ agent: h.agent, rawInput: 'danger-full-access' })
   assert.equal(refused.kind, 'error')
   assert.deepEqual(h.permissionSets, ['read-only'], 'refusal must not change the permission')
@@ -252,6 +258,19 @@ function command(list, name) {
   h.handlers.get('tools/change')()
   assert.equal(h.restrictions.at(-1).kind, 'restrict')
   assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
+}
+
+// 9. Switching an already-created Agent to Chat applies the restriction from
+// the selection event, before the next tools.resolve().
+{
+  const h = await boot()
+  assert.equal(h.restrictions.length, 0, 'no restriction before the switch')
+  h.handlers.get('session/event')(
+    { id: 's1' },
+    { type: 'agent-preset/selected', data: { agentPreset: 'chat' } },
+  )
+  assert.equal(h.restrictions.length, 1, 'switch should apply the restriction')
+  assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
 }
 
 console.log('chat-mode preset: all logic checks passed')

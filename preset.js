@@ -111,8 +111,20 @@ export async function apply(ctx) {
 
   // Per-session selected state awaiting the next accepted in-turn pre-step.
   const pending = new WeakMap()
-  // Per-session restriction bookkeeping; strong refs, cleaned up with the agent.
+  // Per-session restriction bookkeeping; strong refs, cleaned up with the preset
+  // revision so a chat→other→chat switch cannot leak or duplicate a mask.
   const agents = new Map()
+  ctx.effect(() => () => {
+    for (const entry of agents.values()) {
+      if (entry.dispose === undefined) continue
+      try {
+        entry.dispose()
+      } catch {
+        // The Agent scope may already have disposed it.
+      }
+    }
+    agents.clear()
+  }, 'chat-mode: preset restrictions cleanup')
 
   const projection = await ctx.sessionProjections.register({
     key: CHAT_MODE_PROJECTION,
@@ -225,66 +237,13 @@ export async function apply(ctx) {
   }
 
   /**
-   * Register the Agent-scoped `/permission` shadow. This is the guaranteed
-   * shadow path from the commands documentation; it is disposed with the Agent.
+   * Apply the initial state and permission lock for one Agent. The `/permission`
+   * command lives in the preset scope (registered once alongside `/chat-tools`)
+   * so a chat→other→chat switch cannot duplicate an Agent-scoped command.
    */
-  const registerPermissionCommand = (agent) => {
-    agent.ctx.inject(['commands'], (commandCtx) => {
-      commandCtx.commands.register({
-        name: 'permission',
-        description: 'Switch the permission preset (chat mode allows read-only or workspace-write only)',
-        input: { hint: 'read-only|workspace-write' },
-        handler: ({ agent: receiving, rawInput }) => {
-          const name = rawInput.trim()
-          if (name === '') {
-            let current = 'unknown'
-            try {
-              current = ctx.permissionPresets.current(receiving.session)
-            } catch {
-              // Report the fallback value.
-            }
-            return {
-              kind: 'success',
-              text: `current preset ${current} (available: read-only, workspace-write)`,
-            }
-          }
-          if (name !== 'read-only' && name !== 'workspace-write') {
-            return {
-              kind: 'error',
-              text: `Chat mode only allows read-only or workspace-write; "${name}" is unavailable.`,
-            }
-          }
-          try {
-            ctx.permissionPresets.set(receiving.session, name)
-          } catch (error) {
-            return {
-              kind: 'error',
-              text: `failed to switch preset: ${error instanceof Error ? error.message : String(error)}`,
-            }
-          }
-          return { kind: 'success', text: `preset ${name}` }
-        },
-      })
-    })
-  }
-
-  /** Apply the initial state, permission lock, and command shadow for one Agent. */
   const initializeAgent = (agent, source) => {
     applyRestrictions(agent, stateOf(agent.session))
     pinPermission(agent.session, source)
-    registerPermissionCommand(agent)
-    agent.ctx.effect(() => () => {
-      const entry = agents.get(agent.session)
-      if (entry?.dispose !== undefined) {
-        try {
-          entry.dispose()
-        } catch {
-          // The Agent scope may already have disposed it.
-        }
-      }
-      agents.delete(agent.session)
-      pending.delete(agent.session)
-    }, 'chat-mode: Agent state cleanup')
   }
 
   ctx.on('agent/created', ({ agent, source }) => {
@@ -296,6 +255,22 @@ export async function apply(ctx) {
       warn(`chat-mode: initialization failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }, { prepend: true })
+
+  // A blank/live session can be switched to Chat after its Agent already
+  // exists. `agent/created` will not fire again, so apply the restriction from
+  // the selection event itself. The Agent scope is already live; this runs
+  // before the next `tools.resolve()` and fixes the first turn after a switch.
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'agent-preset/selected') return
+    if (event.data?.agentPreset !== 'chat') return
+    const agent = ctx.agents.get(session.id)
+    if (agent === undefined) return
+    try {
+      applyRestrictions(agent, stateOf(session))
+    } catch (error) {
+      warn(`chat-mode: preset switch restriction failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
 
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     // Fallback for a composition where the creation event did not reach the
@@ -392,6 +367,45 @@ export async function apply(ctx) {
           kind: 'success',
           text: `chat tools: shell=${next.shell ? 'on' : 'off'}, web_search=${next.webSearch ? 'on' : 'off'}`,
         }
+      },
+    })
+
+    // Preset-scope `/permission` shadow: available to every Chat Agent, and
+    // disposed/re-registered with the preset revision instead of accumulating
+    // Agent-scoped command registrations across a chat→other→chat switch.
+    commandCtx.commands.register({
+      name: 'permission',
+      description: 'Switch the permission preset (chat mode allows read-only or workspace-write only)',
+      input: { hint: 'read-only|workspace-write' },
+      handler: ({ agent: receiving, rawInput }) => {
+        const name = rawInput.trim()
+        if (name === '') {
+          let current = 'unknown'
+          try {
+            current = ctx.permissionPresets.current(receiving.session)
+          } catch {
+            // Report the fallback value.
+          }
+          return {
+            kind: 'success',
+            text: `current preset ${current} (available: read-only, workspace-write)`,
+          }
+        }
+        if (name !== 'read-only' && name !== 'workspace-write') {
+          return {
+            kind: 'error',
+            text: `Chat mode only allows read-only or workspace-write; "${name}" is unavailable.`,
+          }
+        }
+        try {
+          ctx.permissionPresets.set(receiving.session, name)
+        } catch (error) {
+          return {
+            kind: 'error',
+            text: `failed to switch preset: ${error instanceof Error ? error.message : String(error)}`,
+          }
+        }
+        return { kind: 'success', text: `preset ${name}` }
       },
     })
   })

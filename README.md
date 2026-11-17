@@ -39,7 +39,7 @@ Chat 会话的输入框左侧会出现两个紧凑下拉框：
 
 - 允许的权限预设只有 `read-only` 与 `workspace-write`，两者的 approval policy 都是 `ask`。
 - 因此模型仍可以在工具调用中通过 `sandbox_permissions` + `justification` 申请一次性的更宽权限；用户批准后只对那一次调用生效。
-- `danger-full-access` 被 Agent 作用域的 `/permission` 命令拒绝；`/permission danger-full-access` 会返回错误，不改变会话权限。
+- `danger-full-access` 被 preset 作用域的 `/permission` 命令拒绝；`/permission danger-full-access` 会返回错误，不改变会话权限。
 - Chat 会话中，客户端的 shipped 权限控件会被隐藏，改用本插件的两选项下拉框。斜杠命令 `/permission` 仍可用，但其 picker 仍会显示完整进程目录；选择完全权限会被 Host 拒绝。**推荐使用输入框左侧的下拉框**。
 
 ## 工作原理
@@ -70,7 +70,7 @@ preset-chat (id: chat, name: Chat, order: 5)
   - `source === 'startup'`（新会话）→ 固定为 `read-only`；
   - `resume` / `clear` / `compact` → 只保留 `read-only` / `workspace-write`；
   - 如果全局默认被设为完全权限，新 Chat 会话仍会被纠正为 `read-only`。
-- 在 Agent 作用域注册同名 `/permission` 命令，shadow 全局命令，只接受两个允许值；该命令随 Agent 一起释放。
+- 在 preset 作用域注册同名 `/permission` 命令，shadow 全局命令，只接受两个允许值；该命令随 preset 生命周期释放/重注册，不会在 chat→other→chat 切换时累积 Agent 作用域注册。
 - 客户端只在 Chat 会话中显示权限下拉框；shipped 权限 seat 通过 `body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"]` 隐藏。
 
 ### 工具按需启用
@@ -81,6 +81,7 @@ preset-chat (id: chat, name: Chat, order: 5)
   - `webSearch: false` → 隐藏 `web_search`；
   - 用户启用后 dispose 对应 restriction，下一次 step 的工具 schema 出现。
 - `agent/created` listener 使用 `prepend: true`，尽量早于普通 creation observer；`known` 为空时不缓存，并在 `tools/change` 时对已知 Chat Agent 重新应用 restriction，避免“首轮包含、第二轮才移除”。
+- 对**已存在 Agent 的 preset 切换**，preset 插件的 `session/event` listener 在 `agent-preset/selected` 时立即 `applyRestrictions`，早于下一轮 `tools.resolve`；restriction 与 `/permission` 命令随 preset 卸载清理，chat→other→chat 不会重复注册。
 - `tools/pre-execute` 兜底：如果某个 batch 在 restriction 变化前已解析，调用被关闭的工具会得到明确的 deny 文本，提示用户在“对话设置”中启用。
 - 状态由 log-only 的 `chat-mode/tools` 事件与 `chatMode` 会话投影持久化，resume/fork 后恢复。
 - open turn 期间切换工具不会直接 append；选择先进入内存 pending，在下一个 accepted `agent/pre-step` 写入，restriction 立即按 pending 生效。
@@ -137,10 +138,10 @@ plugin_manager install_bundle
 
 - **不提供文件修改工具**：没有 `write`、`edit`、`apply_patch`。如需修改文件，请切换到 `standard` / `ptc` 等模式。
 - **不提供 Office、技能、Goal、Plan、Todo、Subagent、Workflow、日程、后台 jobs** 等工具；这是“纯对话”的刻意裁剪。
-- **shipped `/permission` slash picker 仍显示完全权限**：本插件通过 Agent 作用域命令拒绝它，但无法修改 shipped picker 的进程目录。输入框左侧的权限下拉框才是推荐入口。
+- **shipped `/permission` slash picker 仍显示完全权限**：本插件通过 preset 作用域命令拒绝它，但无法修改 shipped picker 的进程目录。输入框左侧的权限下拉框才是推荐入口。
 - **CSS 隐藏 shipped 权限控件**：依赖 renderer 的 `data-slot` 锚点；如果未来版本重命名该锚点，控件会重新出现，但 Host 端仍然拒绝完全权限。
 - **preset 不是安全沙箱**：DSH 文档明确 presets 可以执行 Host 代码。这里的权限锁是功能/策略层，不是安全边界；真正的文件限制来自 sandbox policy 与 approval。
-- **首版只覆盖新建 Chat 会话**：不支持在已有会话中切换 preset 后即时重建权限命令/restriction；需要新建会话。
+- **支持在空白会话中切换到 Chat**：`agent-preset/selected` 事件会在下一轮前应用工具 restriction；`/permission` 与 restriction 随 preset 生命周期释放/重注册。已开始（有 turn）的会话仍受 DSH 的 blank-session 限制，不能切换。
 - **Host 级工具仍存在**：例如 `team_task_*`、`working_directory` 由 Host 组合提供，所有预设都会继承；它们不做文件内容读写。若需要进一步收紧，可在 Agent 作用域用 `restrict()` 追加。
 - **`complete: true` 会抑制工具插件贡献的 prompt guidance**：工具 schema 与 deny 提示仍然存在；如果实测发现读取/搜索质量不足，可在 persona 中补充规则，或改用 `complete: false` + 更克制的 prefix。
 
@@ -179,7 +180,7 @@ plugin_manager install_bundle
 
 **`/permission danger-full-access` 仍然出现在 slash picker**
 
-- 这是 shipped picker 的进程目录行为；Host 端 Agent 作用域命令会拒绝该值。使用输入框左侧的权限下拉框，或忽略该行。
+- 这是 shipped picker 的进程目录行为；Host 端 preset 作用域命令会拒绝该值。使用输入框左侧的权限下拉框，或忽略该行。
 
 **`npm run verify` 报 `no macOS sidecar files` / `no symbolic links`**
 
@@ -194,7 +195,7 @@ plugin_manager install_bundle
 
 | 项目 | 值 |
 | --- | --- |
-| 插件版本 | `1.1.1` |
+| 插件版本 | `1.1.2` |
 | 包名 | `@local/dsh-chat-mode` |
 | Loader entry id | `dsh-chat-mode` |
 | preset id | `chat` |
@@ -202,7 +203,7 @@ plugin_manager install_bundle
 | preset order | `5` |
 | 会话投影 key | `chatMode`（`{ shell: boolean, webSearch: boolean }`） |
 | 会话事件 | `chat-mode/tools` |
-| 权限命令 | `/permission read-only\|workspace-write`（Agent 作用域 shadow） |
+| 权限命令 | `/permission read-only\|workspace-write`（preset 作用域 shadow） |
 | 工具命令 | `/chat-tools [mode off\|shell\|search\|both] [shell on\|off] [search on\|off]` |
 | 工具菜单项 | `shell`（持久终端）、`search`（联网搜索），多选 |
 | 客户端 slot | `conversation.input.left` / id `chat-mode-controls` |

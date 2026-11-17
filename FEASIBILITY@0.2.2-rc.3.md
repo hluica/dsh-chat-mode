@@ -2,7 +2,7 @@
 
 - **Harness 版本**：`0.2.2-rc.3`（`DSH_INSTALL_DIR/package.json` 为 `@deepseek-ai/dsh@0.2.2-rc.3`）
 - **工作区**：`/Users/hanluica/Documents/deepseek-harness/local-plugins/dsh-chat-mode`
-- **状态**：`1.0.0` 已实施并完成 Host 端集成验证（2026-11-17）；`1.1.0` 工具多选菜单与下拉框外观优化已实施并通过构建/逻辑测试（2026-11-17），客户端视觉验收待用户刷新页面后新建/打开 Chat 会话确认。2026-11-17 追加新 Chat 会话权限与首轮工具可见性修复设计（目标版本 `1.1.1`），待新轮次实施。
+- **状态**：`1.0.0` 已实施并完成 Host 端集成验证（2026-11-17）；`1.1.0` 工具多选菜单与下拉框外观优化已实施；`1.1.1` 新 Chat 会话权限与首轮工具可见性修复已实施；`1.1.2` 已存在 Agent 的 preset 切换（chat→ptc→chat）首轮工具可见性修复已实施并通过构建/逻辑测试（2026-11-17），需重启 DSH 后由用户复测首轮 `request/header`。
 - **文档日期**：2026-11-17
 
 ---
@@ -1698,3 +1698,61 @@ function pin(ctx, session, bySelection = false) {
 
 - `index.js`/`preset.js` 是 Host/预设半变化，必须重启 DSH；刷新页面只更新 Client 半。
 - 按工作区规则第 8 条，实施并验证后提示用户重启，不尝试 workaround。
+
+### 13.8 追加修复：已存在 Agent 的 preset 切换（2026-11-17）
+
+#### 13.8.1 用户会话日志证据
+
+用户提供的 `session.v4.jsonl`（`session-78f8bd45-...`）显示：
+
+```text
+header: agentPreset = "ptc"
+seq 5  agent-preset/selected: chat
+seq 7  agent-preset/selected: ptc
+seq 8  agent-preset/selected: chat
+seq 9  permission/preset: read-only
+seq 10 sandbox/mode: read-only
+seq 19 request/header turn 1 tools: [..., "bash", ..., "web_search", ...]
+seq 34 request/header turn 2 tools: [..., no "bash", no "web_search", ...]
+```
+
+即：会话先以 `ptc` 创建，随后在**空白状态**下切换 `chat → ptc → chat`，然后才发送第一条消息。首轮请求包含 `bash`/`web_search`，第二轮不包含。
+
+#### 13.8.2 根因
+
+上一轮修复的 `agent/created` prepend 只对**新建 Agent**生效。该会话的 Agent 在第一次切换前已按 `ptc` 创建；切换到 `chat` 不会再触发 `agent/created`。`agent/pre-step` 的 lazy init 又在 `tools.resolve` **之后**，所以：
+
+- 第一次 chat 切换：preset 插件没有初始化该 Agent 的 restriction；
+- 第一轮 `tools.resolve` 看到 preset 中的 `bash`/`web_search`；
+- `agent/pre-step` 才初始化，第二轮起 restriction 才生效。
+
+这不是新会话创建路径的问题，而是“已存在 Agent 切换到 Chat”的路径没有被覆盖。此前的 FEASIBILITY 13.4/13.7 已把“中途切换”列为后续增强；现在必须补齐。
+
+#### 13.8.3 修法
+
+`preset.js`：
+
+1. 新增 `ctx.on('session/event', ...)`：
+   - 只处理 `agent-preset/selected` 且 `agentPreset === 'chat'`；
+   - 通过 `ctx.agents.get(session.id)` 取到已存在的 Agent；
+   - 立即 `applyRestrictions(agent, stateOf(session))`；该调用只操作工具注册表，不 append 会话事件，因此在 append 通知内是安全的；
+   - 它在下一轮 `tools.resolve()` 之前执行，修复首轮。
+2. `/permission` 命令从 Agent 作用域移到 **preset 作用域**（与 `/chat-tools` 共用 `ctx.inject(['commands'], ...)`）：
+   - 避免 `chat → ptc → chat` 时在同一个 Agent scope 重复注册同名命令；
+   - 命令随 preset revision 卸载/重注册；
+   - preset 作用域是 Agent 作用域的祖先，`commands.view(agent)` 会合并并 shadow 全局 `/permission`。
+3. 移除 `initializeAgent` 中每 Agent 的 `agent.ctx.effect` 清理与命令注册；改为 preset 级的 `ctx.effect` 清理：
+   - preset 卸载时 dispose 所有 `agents` entry 的 restriction 并 clear；
+   - 重新切回 Chat 时重新 apply；
+   - 不会跨 revision 泄漏或累积。
+4. `agent/created` 仍保留 prepend 初始化；`session/event` 切换路径与它共用 `applyRestrictions`。
+
+#### 13.8.4 验证
+
+- `scripts/test.mjs` 增加：
+  - `agent-preset/selected` 切到 chat 时立即产生 `restrict({ deny: ['bash','web_search'] })`；
+  - `/permission` 命令在 preset 作用域的 commands 列表中注册。
+- `npm test` / `npm run build` 全部通过。
+- 该修复覆盖用户日志中的 `chat → ptc → chat` 序列；重启后首轮请求应不再包含 `bash`/`web_search`。
+- 版本 `1.1.1` → `1.1.2`（bug fix + preset-switch support）。
+- Host/preset 半变化需要重启 DSH；刷新页面只更新 Client 半。
