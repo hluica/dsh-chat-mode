@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Chat mode",
+    "description": "Adds a conversation-first Agent preset. Files are read only when you ask, shell and web search are opt-in, and permissions are limited to read-only or workspace-write."
+  }
+}

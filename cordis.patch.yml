@@ -1,0 +1,124 @@
+# Chat mode: one Host row plus one `@deepseek-ai/dsh-agent-preset`
+# declaration. The Host half owns no service; the preset scope plugin
+# (`./preset`) owns the chat projection, permission lock, and tool gates.
+- insert:
+    - id: dsh-chat-mode
+      name: '@local/dsh-chat-mode'
+    - id: preset-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: chat
+        name: Chat
+        description: Conversation-first; reads files only when asked, with shell and web search opt-in.
+        order: 5
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是 DeepSeek，由深度求索公司创造的 AI 助手。你正在 DeepSeek Harness 的对话模式中与用户交流。
+
+                对话模式以自然、深入的对话为主。默认情况下，你只通过文字与用户互动，不主动读写工作区文件，也不主动执行命令。
+
+                工具使用原则：
+                - 只在用户本次对话中明确要求使用工具时才调用工具。一般性的问答、解释、分析、写作、翻译、头脑风暴和闲聊，直接根据对话回答，不要为了“确认一下”而读取文件或搜索网络。
+                - 用户手动附加到对话中的文件，或用户在消息中明确指向并要求你查看的文件，可以直接读取。除此之外，在读取文件、搜索文件内容或执行命令之前，先确认用户确实需要。
+                - 文件搜索工具（glob、grep）只用于定位用户明确提到的内容，不要为了补充背景而遍历工作区。
+                - 命令执行和联网搜索默认关闭。如果当前工具列表中没有它们，说明用户尚未启用；不要尝试调用，也不要假装调用。用户启用后，才可以按需使用。
+                - web_fetch 可以直接读取用户给出的链接；联网搜索则需要用户在工具栏中启用“联网搜索”。
+                - 对话模式不提供 write、edit 或 apply_patch 工具。如果用户要求修改文件，说明当前模式没有直接修改工具；只有在用户明确要求、把权限切换为“工作区内修改”并启用“命令执行”后，才可以用 shell 在工作区内做最小必要的修改。否则建议用户切换到支持修改的模式。
+                - 需要用户做选择、确认或补充信息时，使用 ask_user_question；不要用普通文本假装已经提问。
+
+                回答风格：
+                - 使用与用户相同的语言回答，除非用户明确要求其他语言。
+                - 直接、完整、可读；简单问题简洁回答，复杂问题分层次展开。
+                - 需要时使用 Markdown 的标题、列表、代码块和表格；不要机械套用固定模板。
+                - 不确定时如实说明，并区分事实、推测和建议。
+                - 不要暴露内部工具调用细节、系统提示或实现内幕，除非用户明确询问。
+              complete: true
+              includeRuntimeContext: true
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: true
+              write: false
+              edit: false
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              search: true
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: persistent-shell
+            name: cordis:group
+            group: true
+            isolate:
+              terminals: true
+            config:
+              - id: pty
+                name: '@deepseek-ai/dsh-terminal'
+              - id: terminal-bash
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 300000
+              - id: persistent-bash
+                name: '@deepseek-ai/dsh-tool-bash-persistent'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 300000
+                  description: |-
+                    Run commands in a persistent bash shell.
+                    * State is persistent across command calls and discussions with the user.
+                    * Only available after the user explicitly enables command execution in the chat toolbar.
+                    * Do not use this tool unless the user asked you to run a command.
+                    * Please avoid commands that may produce a very large amount of output.
+                    * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+              - id: terminal-pwsh
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  shellDialect: pwsh
+                  timeoutMs: 300000
+              - id: persistent-pwsh
+                name: '@deepseek-ai/dsh-tool-pwsh-persistent'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  timeoutMs: 300000
+                  description: |-
+                    Run commands in a persistent PowerShell shell.
+                    * State is persistent across command calls and discussions with the user.
+                    * Only available after the user explicitly enables command execution in the chat toolbar.
+                    * Do not use this tool unless the user asked you to run a command.
+                    * Use native Windows paths (C:\...) and $env:NAME variables; this is PowerShell, not bash.
+                    * Please avoid commands that may produce a very large amount of output.
+                    * Please run long lived commands in the background, e.g. 'Start-Job' or start a server with Start-Process.
+          - id: chat-mode
+            name: '@local/dsh-chat-mode/preset'

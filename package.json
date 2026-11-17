@@ -1,0 +1,53 @@
+{
+  "name": "@local/dsh-chat-mode",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Conversation-first Agent preset: reads files only on request, keeps shell and web search opt-in, and locks permission to read-only or workspace-write.",
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./preset": "./preset.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-api-session-controller"
+      ]
+    }
+  },
+  "files": [
+    "index.js",
+    "preset.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "rebuild": "node scripts/build.mjs --force",
+    "verify": "node scripts/verify.mjs",
+    "clean": "node scripts/build.mjs --clean",
+    "test": "node scripts/test.mjs && node scripts/client-test.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "^0.2.2-rc.2"
+  }
+}
