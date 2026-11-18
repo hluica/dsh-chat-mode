@@ -8,10 +8,13 @@
  *   `/permission` command in `preset.js` is the authority; the shipped
  *   permission control is hidden for chat sessions so "Full access" is not
  *   offered here.
- * - Tools: a multi-select menu with two items, “持久终端” and “联网搜索”.
- *   Checking either one enables that tool; checking both enables both. The
- *   menu stays open while toggling, and `TOOL_ITEMS` is data-driven so future
- *   tools can be added without rewriting the control.
+ * - Tools: a multi-select menu driven by `TOOL_ITEMS`. “持久终端” and
+ *   “联网搜索” are always offered; “Wolfram” appears only while the
+ *   `chatMode.availability` projection reports registered
+ *   `mcp__WolframLanguage__*` tools. Checking an item enables that pack;
+ *   checking several enables all of them. The menu stays open while toggling.
+ *   The Wolfram icon is copied from `@local/dsh-wolfram-mcp` so the plugin
+ *   keeps its zero-dependency client inject list.
  *
  * The body-level `data-dsh-chat-mode` attribute scopes the stylesheet rule that
  * hides the shipped permission seat; non-chat sessions never see it.
@@ -35,14 +38,39 @@ window.__ModuleLoader__.load({
     const NS = 'chatMode'
 
     /**
-     * The tools menu is one data table: adding a future tool means adding one
-     * entry here plus its state field, Host gate, and command branch. The
-     * trigger and multi-select logic stay unchanged.
+     * The tools menu is one data table. `availableKey` marks a dynamic pack:
+     * the item is rendered only while the projection reports that pack as
+     * available. Adding a future pack means one entry here (plus its state
+     * field, Host pack entry, and command branch).
      */
     const TOOL_ITEMS = [
       { id: 'shell', stateKey: 'shell', labelKey: 'tools.shell', icon: ShellIcon },
       { id: 'search', stateKey: 'webSearch', labelKey: 'tools.search', icon: WebIcon },
+      { id: 'wolfram', stateKey: 'wolfram', labelKey: 'tools.wolfram', icon: WolframMcpIcon, availableKey: 'wolfram' },
     ]
+
+    /**
+     * Wolfram mark copied from `@local/dsh-wolfram-mcp/client.js`
+     * (`WolframMcpIcon`). It is a plain currentColor SVG so the plugin needs no
+     * additional client inject entry.
+     */
+    function WolframMcpIcon({ size = 16, active = false }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        'aria-hidden': true,
+        focusable: false,
+        style: { display: 'block', opacity: active ? 1 : 0.72 },
+      },
+        h('path', {
+          d: 'M8.00 1.00 L9.26 4.95 L12.95 3.05 L11.05 6.74 L15.00 8.00 L11.05 9.26 L12.95 12.95 L9.26 11.05 L8.00 15.00 L6.74 11.05 L3.05 12.95 L4.95 9.26 L1.00 8.00 L4.95 6.74 L3.05 3.05 L6.74 4.95 Z M8.00 6.40 L8.53 7.47 L9.60 8.00 L8.53 8.53 L8.00 9.60 L7.47 8.53 L6.40 8.00 L7.47 7.47 Z',
+          fill: 'currentColor',
+          fillRule: 'evenodd',
+          clipRule: 'evenodd',
+        }),
+      )
+    }
 
     /** Chinese copy for the two dropdowns. */
     const zh = {
@@ -55,7 +83,7 @@ window.__ModuleLoader__.load({
       'tools.off': '全部关闭',
       'tools.shell': '持久终端',
       'tools.search': '联网搜索',
-      'tools.both': '持久终端 + 联网',
+      'tools.wolfram': 'Wolfram',
       'tools.title': '启用或关闭对话模式的高级工具（可多选）',
     }
 
@@ -70,7 +98,7 @@ window.__ModuleLoader__.load({
       'tools.off': 'Off',
       'tools.shell': 'Persistent shell',
       'tools.search': 'Web search',
-      'tools.both': 'Shell + Web',
+      'tools.wolfram': 'Wolfram',
       'tools.title': 'Enable or disable chat-mode advanced tools (multi-select)',
     }
 
@@ -191,17 +219,31 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
       }, [isChat])
 
       const liveTools = tools === undefined
-        ? { shell: false, webSearch: false }
-        : { shell: tools.shell === true, webSearch: tools.webSearch === true }
+        ? { shell: false, webSearch: false, wolfram: false, availability: {} }
+        : {
+            shell: tools.shell === true,
+            webSearch: tools.webSearch === true,
+            wolfram: tools.wolfram === true,
+            availability: tools.availability ?? {},
+          }
       const effectiveTools = pendingTools ?? liveTools
+
+      // Availability is environment state, never optimistic: it comes from the
+      // durable projection so clicking an item cannot hide it while the
+      // optimistic pending choice is still in flight.
+      const availability = liveTools.availability
+      const visibleItems = TOOL_ITEMS.filter(item =>
+        item.availableKey === undefined || availability[item.availableKey] === true)
 
       // Keep the optimistic selection until the durable projection catches up.
       useEffect(() => {
         if (pendingTools === null) return
-        if (pendingTools.shell === liveTools.shell && pendingTools.webSearch === liveTools.webSearch) {
+        if (pendingTools.shell === liveTools.shell
+          && pendingTools.webSearch === liveTools.webSearch
+          && pendingTools.wolfram === liveTools.wolfram) {
           setPendingTools(null)
         }
-      }, [pendingTools, liveTools.shell, liveTools.webSearch])
+      }, [pendingTools, liveTools.shell, liveTools.webSearch, liveTools.wolfram])
 
       if (!isChat) return null
 
@@ -221,23 +263,17 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
         { id: 'workspace-write', label: t('permission.workspaceWrite'), ...(WorkspaceIcon ? { icon: h(WorkspaceIcon) } : {}) },
       ]
 
-      const selectedTools = TOOL_ITEMS
-        .filter(item => effectiveTools[item.stateKey] === true)
-        .map(item => item.id)
-      const toolsValue = selectedTools.length === 0
-        ? 'off'
-        : effectiveTools.shell && effectiveTools.webSearch
-          ? 'both'
-          : effectiveTools.shell
-            ? 'shell'
-            : 'search'
-      const toolsItems = TOOL_ITEMS.map(item => ({
+      const selectedItems = visibleItems.filter(item => effectiveTools[item.stateKey] === true)
+      const selectedTools = selectedItems.map(item => item.id)
+      const toolsItems = visibleItems.map(item => ({
         id: item.id,
         label: t(item.labelKey),
         ...(item.icon ? { icon: h(item.icon) } : {}),
       }))
-      const toolsLabel = t(`tools.${toolsValue}`)
-      const toolsActive = selectedTools.length > 0
+      const toolsLabel = selectedItems.length === 0
+        ? t('tools.off')
+        : selectedItems.map(item => t(item.labelKey)).join(' + ')
+      const toolsActive = selectedItems.length > 0
 
       const permissionDisabled = locked === true || selection === undefined
       const toolsDisabled = locked === true
@@ -274,7 +310,11 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
             // Multi-select: keep the menu open and toggle one item.
             const item = TOOL_ITEMS.find(entry => entry.id === id)
             if (item === undefined) return
-            const next = { shell: effectiveTools.shell, webSearch: effectiveTools.webSearch }
+            const next = {
+              shell: effectiveTools.shell,
+              webSearch: effectiveTools.webSearch,
+              wolfram: effectiveTools.wolfram,
+            }
             next[item.stateKey] = !next[item.stateKey]
             setPendingTools(next)
             void runCommand(`/chat-tools ${item.id} ${next[item.stateKey] ? 'on' : 'off'}`)

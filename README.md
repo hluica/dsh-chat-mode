@@ -2,7 +2,9 @@
 
 最后实质性修改于Harness版本：0.2.2-rc.3
 
-在 DSH 中新增一个以纯对话为主的 Agent 预设 **Chat**（preset id：`chat`）：默认只进行文字对话，文件读取需要用户明确要求；持久终端与联网搜索默认隐藏，由用户在输入框左侧的“对话设置”中显式启用；权限只允许“仅可查看”和“工作区内修改”，不允许选择“完全权限”。
+在 DSH 中新增一个以纯对话为主的 Agent 预设 **Chat**（preset id：`chat`）：默认只进行文字对话，文件读取需要用户明确要求；持久终端、联网搜索与 Wolfram MCP 工具默认隐藏，由用户在输入框左侧的“对话设置”中显式启用；权限只允许“仅可查看”和“工作区内修改”，不允许选择“完全权限”。
+
+Wolfram 工具是**动态工具包**：只有当 DSH 中存在 `mcp__WolframLanguage__*` 工具时，工具菜单才出现“Wolfram”一项；MCP 注册/移除时，菜单、模型工具列表与 system prompt 会一起自动更新，无需刷新页面或重启会话。
 
 ## 使用与效果
 
@@ -20,20 +22,20 @@
 
 Chat 会话的输入框左侧会出现两个紧凑下拉框：
 
-| 控件 | 可选值                        | 效果                                                                                                         |
-| ---- | ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| 权限 | 仅可查看 / 工作区内修改       | 提交 `/permission read-only` 或 `/permission workspace-write`；不提供完全权限。                              |
-| 工具 | 持久终端 / 联网搜索（可多选） | 勾选任意一项即提交 `/chat-tools shell on` 或 `/chat-tools search on`；再点一次取消。两项都不勾选即全部关闭。 |
+| 控件 | 可选值                                             | 效果                                                                                                         |
+| ---- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 权限 | 仅可查看 / 工作区内修改                            | 提交 `/permission read-only` 或 `/permission workspace-write`；不提供完全权限。                              |
+| 工具 | 持久终端 / 联网搜索 / Wolfram（可多选，按可用性） | 勾选任意一项即提交 `/chat-tools shell on`、`search on` 或 `wolfram on`；再点一次取消。全部不勾选即全部关闭。 |
 
-工具下拉框是**多选菜单**：菜单保持打开，可以连续勾选两项；每项带图标与 check 标记，触发器显示当前组合（关闭 / 持久终端 / 联网搜索 / 持久终端 + 联网）。未来增加工具时，客户端只需在 `TOOL_ITEMS` 表中增加一个菜单项。
+工具下拉框是**多选菜单**：菜单保持打开，可以连续勾选多项；每项带图标与 check 标记，触发器显示当前组合（关闭 / 持久终端 / 联网搜索 / Wolfram，多个启用时用 ` + ` 连接）。Wolfram 项只在 `chatMode.availability.wolfram` 为 true（即当前注册表存在 `mcp__WolframLanguage__*` 工具）时渲染；其余两项始终显示。未来增加工具时，客户端只需在 `TOOL_ITEMS` 表中增加一个菜单项，Host 端在 `TOOL_PACKS` 表中增加对应条目。
 
 默认状态：
 
 - 权限：新 Chat 会话在**创建时**即 pin 为 **仅可查看**（早于首轮请求，空白新会话界面也显示正确值）；恢复的 Chat 会话保留已保存的 `read-only` / `workspace-write`，若发现更宽权限则纠正为 `read-only`。
-- 工具：两项都**不勾选**，即 `bash`/`pwsh` 与 `web_search` 不出现在模型工具列表中。
+- 工具：Wolfram 存在时三项都**不勾选**，即 `bash`/`pwsh`、`web_search` 与 `mcp__WolframLanguage__*` 都不出现在模型工具列表中；Wolfram 不存在时菜单只有前两项。
 - `read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question` 始终可用，但由 system prompt 约束为“只在用户明确要求时使用”。
 
-两个下拉框的外观使用宿主主题 token：带权限/终端/联网图标、胶囊式触发器、hover / focus-visible / active / disabled 状态，以及展开时旋转的 chevron；亮/暗主题自动适配。工具菜单与权限菜单都复用 shipped `Menu` 的 portal、键盘与焦点行为。
+两个下拉框的外观使用宿主主题 token：带权限/终端/联网/Wolfram 图标、胶囊式触发器、hover / focus-visible / active / disabled 状态，以及展开时旋转的 chevron；亮/暗主题自动适配。工具菜单与权限菜单都复用 shipped `Menu` 的 portal、键盘与焦点行为。
 
 ### 权限与一次性授权
 
@@ -61,7 +63,9 @@ preset-chat (id: chat, name: Chat, order: 5)
   chat-mode preset 插件
 ```
 
-`persona.complete: true` 让 Chat 使用自己的 system prompt，但 `includeRuntimeContext: true` 保留文件策略、cwd、时间等运行时上下文。
+Wolfram 工具**不在 preset 内注册**：它们由 `@local/dsh-wolfram-mcp` 通过 `mcpManager` 注册为全局 MCP 工具。preset 只按 `mcp__WolframLanguage__` 前缀动态发现、整包 gate，并在 system prompt 中按需注入 guidance。
+
+`persona.complete: true` 让 Chat 使用自己的 system prompt，但 `includeRuntimeContext: true` 保留文件策略、cwd、时间等运行时上下文；persona prefix 内的 `{{chat_tool_guidance}}` 由 preset 插件的 prompt 变量按 step 求值，不依赖额外 section。
 
 ### 权限锁定
 
@@ -75,24 +79,36 @@ preset-chat (id: chat, name: Chat, order: 5)
 
 ### 工具按需启用
 
-- 预设在 preset 作用域注册 `bash`/`pwsh` 与 `web_search`。
-- preset 插件在每个 Chat Agent 的 `agent.ctx.tools` 上注册 `restrict({ deny })`：
-  - `shell: false` → 隐藏 `bash`（Windows 为 `pwsh`）；
-  - `webSearch: false` → 隐藏 `web_search`；
-  - 用户启用后 dispose 对应 restriction，下一次 step 的工具 schema 出现。
-- `agent/created` listener 使用 `prepend: true`，尽量早于普通 creation observer；`known` 为空时不缓存，并在 `tools/change` 时对已知 Chat Agent 重新应用 restriction，避免“首轮包含、第二轮才移除”。
-- 对**已存在 Agent 的 preset 切换**，preset 插件的 `session/event` listener 在 `agent-preset/selected` 时立即 `applyRestrictions`，早于下一轮 `tools.resolve`；restriction 与 `/permission` 命令随 preset 卸载清理，chat→other→chat 不会重复注册。
-- `tools/pre-execute` 兜底：如果某个 batch 在 restriction 变化前已解析，调用被关闭的工具会得到明确的 deny 文本，提示用户在“对话设置”中启用。
-- 状态由 log-only 的 `chat-mode/tools` 事件与 `chatMode` 会话投影持久化，resume/fork 后恢复。
-- open turn 期间切换工具不会直接 append；选择先进入内存 pending，在下一个 accepted `agent/pre-step` 写入，restriction 立即按 pending 生效。
+- `preset.js` 用一张 `TOOL_PACKS` 表描述三个工具包（shell、联网搜索、Wolfram）：
+  - 静态包用 `names` 列出预设内注册的工具（`bash`/`pwsh`、`web_search`）；
+  - 动态包用 `prefix` 从全局工具注册表发现工具（Wolfram 为 `mcp__WolframLanguage__`）；
+  - 每个包带状态字段、deny 文案与可选 guidance。
+- preset 插件在每个 Chat Agent 的 `agent.ctx.tools` 上注册 `restrict({ deny })`：未启用的包整包隐藏，用户启用后 dispose 对应 restriction，下一次 step 的工具 schema 出现。
+- `agent/created` listener 使用 `prepend: true`，尽量早于普通 creation observer；静态包的 `known` 为空时不缓存，并在 `tools/change` 时对已知 Chat Agent 重新应用 restriction，避免“首轮包含、第二轮才移除”。
+- **动态工具包**：`tools/change` 是 unfiltered 的全局注册表通知，MCP 注册/移除工具时都会触发；preset 插件据此重新发现 `mcp__WolframLanguage__*`、更新 deny 列表，并把 `chat-mode/availability` 写入会话日志。投影把 `availability.wolfram` 推给浏览器，因此菜单项无需刷新即可出现/消失。
+- 工具发现使用 **global view**（`ctx.tools.definitions()`），避免“上一轮自己的 deny 把工具隐藏后误判为不存在”；静态包则使用 Agent view 并缓存首次发现结果。
+- 对**已存在 Agent 的 preset 切换**，preset 插件的 `session/event` listener 在 `agent-preset/selected` 切到 chat 时立即 `applyRestrictions`，早于下一轮 `tools.resolve`；全局 `agent-preset/selected` 在切走时清理条目，避免 `tools/change` 把 Chat 的 deny 重放到其他 preset。restriction 与 `/permission` 命令随 preset 卸载清理，chat→other→chat 不会重复注册。
+- `tools/pre-execute` 兜底：如果某个 batch 在 restriction 变化前已解析，调用被关闭的工具会得到明确的 deny 文本（shell / 联网搜索 / Wolfram 分别提示在“对话设置”中启用）。
+- 状态由 log-only 的 `chat-mode/tools` 与 `chat-mode/availability` 事件和 `chatMode` 会话投影持久化，resume/fork 后恢复；旧日志缺少 `wolfram` / `availability` 时按 `false` / 空对象归一化，projection `stateVersion` 仍为 1。
+- open turn 期间切换工具不会直接 append；选择先进入内存 pending，在下一个 accepted `agent/pre-step` 写入，restriction 立即按 pending 生效。MCP 可用性变化通过 microtask 去重后 append，避免重入 `session.append()`。
 - 注意：agent loop 在 `agent/pre-step` **之前**就 resolve 工具集，因此 pre-step reapply 只影响后续 step；首轮的正确性依靠 Host 提前 pin、`agent/created` prepend 与 `tools/change` 重试。
+
+### 系统指令联动
+
+- `cordis.patch.yml` 的 persona prefix 含 `{{chat_tool_guidance}}`；`preset.js` 在 preset scope 注册该变量，`index.js` 在 global scope 注册返回 `''` 的 fallback（preset scope 覆盖 global）。即使 preset 插件加载失败，persona 的严格插值也不会导致 prompt assembly 报错。
+- provider 每次 assembly 都会根据当前会话状态与工具注册表求值：只有 Wolfram 工具**存在且用户已勾选**时，才注入 Wolfram 使用规则：
+  - 具体、明确的计算任务、符号推理、形式化变换 → 应当调用 Wolfram 工具；
+  - 观点性问题、创意写作、纯粹的语言任务，或近似推理即可满足要求 → 不应当调用；
+  - 技能文档位于 `~/.dsh/skills/wolfram-*/`，需要细节时先读对应 `SKILL.md`。
+- 未勾选时不注入，避免模型看到“应当调用”但工具实际被 deny 的提示。
 
 ### 客户端控件
 
 - 在 `conversation.input.left` 注册 `chat-mode-controls`，只在 `agentPreset === 'chat'` 时渲染。
 - 使用 shipped `Menu` 组件与主题 token，弹出层 portal 到 body，避免 composer 裁剪。
-- 工具菜单使用 `Menu` 的 `selectedIds` + `selection: 'check'` 多选模式；item 点击只回调 `onSelect`，父组件保持 `open`，因此可以连续勾选。`TOOL_ITEMS` 是数据表，未来工具只需增加一项。
-- 工具状态使用乐观 `pendingTools`：勾选立即更新 check 标记与触发器标签，等 `chatMode` 投影追上后清除；命令失败时回滚。
+- 工具菜单使用 `Menu` 的 `selectedIds` + `selection: 'check'` 多选模式；item 点击只回调 `onSelect`，父组件保持 `open`，因此可以连续勾选。`TOOL_ITEMS` 是数据表，`availableKey` 标记只在投影报告该包可用时才渲染的动态项；Wolfram 图标从 `@local/dsh-wolfram-mcp/client.js` 复制，不新增 `dsh.client.inject` 依赖。
+- 工具状态使用乐观 `pendingTools`：勾选立即更新 check 标记与触发器标签，等 `chatMode` 投影追上后清除；命令失败时回滚。**可用性不参与乐观更新**——只读取已落盘的 `liveTools.availability`，否则点击 Wolfram 的瞬间 pending 尚不包含 availability，菜单项会闪烁消失。
+- 触发器标签由已选中且可见的项 `join(' + ')` 生成，不再维护固定组合文案；无选中项显示“全部关闭”。
 - 权限菜单使用 `selectedId` 单选；两个菜单的 item 都带图标，触发器使用主题 token 的胶囊样式。
 - 权限与工具下拉框都通过 `session.command()` 提交，执行路径与 shipped 控件一致。
 - 中英文文案由 Client locale 的 `chatMode` 命名空间提供。
@@ -143,7 +159,9 @@ plugin_manager install_bundle
 - **preset 不是安全沙箱**：DSH 文档明确 presets 可以执行 Host 代码。这里的权限锁是功能/策略层，不是安全边界；真正的文件限制来自 sandbox policy 与 approval。
 - **支持在空白会话中切换到 Chat**：`agent-preset/selected` 事件会在下一轮前应用工具 restriction；`/permission` 与 restriction 随 preset 生命周期释放/重注册。已开始（有 turn）的会话仍受 DSH 的 blank-session 限制，不能切换。
 - **Host 级工具仍存在**：例如 `team_task_*`、`working_directory` 由 Host 组合提供，所有预设都会继承；它们不做文件内容读写。若需要进一步收紧，可在 Agent 作用域用 `restrict()` 追加。
-- **`complete: true` 会抑制工具插件贡献的 prompt guidance**：工具 schema 与 deny 提示仍然存在；如果实测发现读取/搜索质量不足，可在 persona 中补充规则，或改用 `complete: false` + 更克制的 prefix。
+- **`complete: true` 会抑制工具插件贡献的 prompt guidance**：工具 schema 与 deny 提示仍然存在；本插件通过 `chat_tool_guidance` 变量补充 Chat 自己的规则，未启用 Wolfram 时不注入，避免与工具列表矛盾。
+- **动态工具包依赖“MCP 工具为全局注册”**：当前 `mcpManager` 在 root fiber 挂载 `mcp-client`，因此 `ctx.tools.definitions()` 能看到 `mcp__WolframLanguage__*`。若未来出现 preset 局部注册的 MCP 工具，需要把发现函数改为可注入策略。
+- **Wolfram 技能文档由 `dsh-wolfram-mcp` 安装**：本插件不复制、不删除 `~/.dsh/skills/wolfram-*`，只在 guidance 中提示路径。
 
 ## 故障排查
 
@@ -167,10 +185,21 @@ plugin_manager install_bundle
 - 若在模型运行中切换，选择会在下一个 accepted pre-step 写入；工具 schema 可能要到下一轮才出现。
 - 检查 `agent.ctx.tools.schemas(agent)` 是否包含 `bash`；若包含但模型不调用，检查 system prompt 是否要求用户明确指示。
 
-**首轮工具列表仍包含持久终端 / 联网搜索**
+**首轮工具列表仍包含持久终端 / 联网搜索 / Wolfram**
 
 - 确认已重启 DSH；Host 半与 preset 插件的变化不会只靠刷新页面生效。
 - 检查 `agent/created` listener 是否为 `prepend: true`、`tools/change` 是否在工具注册后重新应用 restriction；若首轮仍出现，说明首轮 `tools.resolve` 确实发生在 restriction 之前，需要采用 FEASIBILITY 13.4.3 的动态挂载方案。
+
+**工具菜单没有 Wolfram / 勾选后模型仍看不到 Wolfram 工具**
+
+- 工具菜单没有 Wolfram：说明当前没有注册的 `mcp__WolframLanguage__*` 工具。打开 Settings → Wolfram MCP 确认 MCP 已连接、工具已加载；MCP 启动较慢时，工具出现后菜单会自动补上（`tools/change` 驱动，无需刷新）。
+- 勾选后仍看不到：确认 `chatMode` 投影已更新，且 `tools/pre-execute` 没有 deny；Wolfram 属于动态包，首轮可能因 MCP 尚未连接而缺失，下一 step 会自动出现。
+- 若手动调用被 deny，deny 文本会提示在“对话设置”中启用“Wolfram”。
+
+**已勾选 Wolfram，但 system prompt 没有 Wolfram 规则**
+
+- 规则只在“工具存在且本会话已勾选”时注入；MCP 掉线或未勾选时为正常行为。
+- 规则是 prompt 变量 `chat_tool_guidance` 的一部分：preset 插件注册真实值，Host 半注册空 fallback。若刷新后仍缺失，确认 preset 插件已加载（`plugin_manager list_plugins` 中 `preset-chat` 为 active），并重启 DSH。
 
 **权限下拉框选“工作区内修改”后仍无法写文件**
 
@@ -195,19 +224,21 @@ plugin_manager install_bundle
 
 | 项目            | 值                                                                             |
 | --------------- | ------------------------------------------------------------------------------ |
-| 插件版本        | `1.1.2`                                                                        |
-| 包名            | `@local/dsh-chat-mode`                                                         |
-| Loader entry id | `dsh-chat-mode`                                                                |
-| preset id       | `chat`                                                                         |
-| preset 显示名   | `Chat`                                                                         |
-| preset order    | `5`                                                                            |
-| 会话投影 key    | `chatMode`（`{ shell: boolean, webSearch: boolean }`）                         |
-| 会话事件        | `chat-mode/tools`                                                              |
-| 权限命令        | `/permission read-only\|workspace-write`（preset 作用域 shadow）               |
-| 工具命令        | `/chat-tools [mode off\|shell\|search\|both] [shell on\|off] [search on\|off]` |
-| 工具菜单项      | `shell`（持久终端）、`search`（联网搜索），多选                                |
-| 客户端 slot     | `conversation.input.left` / id `chat-mode-controls`                            |
-| locale 命名空间 | `chatMode`                                                                     |
+| 插件版本        | `1.2.0`                                                                                                          |
+| 包名            | `@local/dsh-chat-mode`                                                                                           |
+| Loader entry id | `dsh-chat-mode`                                                                                                  |
+| preset id       | `chat`                                                                                                           |
+| preset 显示名   | `Chat`                                                                                                           |
+| preset order    | `5`                                                                                                              |
+| 会话投影 key    | `chatMode`（`{ shell, webSearch, wolfram, availability: { wolfram: boolean } }`）                               |
+| 会话事件        | `chat-mode/tools`、`chat-mode/availability`                                                                      |
+| 权限命令        | `/permission read-only\|workspace-write`（preset 作用域 shadow）                                                 |
+| 工具命令        | `/chat-tools [mode off\|shell\|search\|both\|wolfram\|all] [shell on\|off] [search on\|off] [wolfram on\|off]`   |
+| 工具菜单项      | `shell`（持久终端）、`search`（联网搜索）、`wolfram`（Wolfram，按可用性显示），多选                              |
+| Wolfram 工具前缀 | `mcp__WolframLanguage__`                                                                                        |
+| prompt 变量     | `chat_tool_guidance`（preset scope 覆盖 global fallback）                                                        |
+| 客户端 slot     | `conversation.input.left` / id `chat-mode-controls`                                                              |
+| locale 命名空间 | `chatMode`                                                                                                       |
 
 行为、接口或契约变化时提升 `package.json` 版本；纯文档改动保持版本。迁移记录与历史对比写入 `FEASIBILITY@<harness-version>.md`。
 

@@ -1756,3 +1756,361 @@ seq 34 request/header turn 2 tools: [..., no "bash", no "web_search", ...]
 - 该修复覆盖用户日志中的 `chat → ptc → chat` 序列；重启后首轮请求应不再包含 `bash`/`web_search`。
 - 版本 `1.1.1` → `1.1.2`（bug fix + preset-switch support）。
 - Host/preset 半变化需要重启 DSH；刷新页面只更新 Client 半。
+
+---
+
+# 十四、动态工具包：把 Wolfram MCP 工具接入对话模式（2026-11-18）
+
+## 14.1 目的与范围
+
+当前 Chat 模式的“工具”菜单只有 **持久终端** 与 **联网搜索** 两项；Wolfram MCP 由 `@local/dsh-wolfram-mcp` 在运行时注册为 `mcp__WolframLanguage__*`，完全绕过了 Chat 模式的工具开关。本轮目标：
+
+1. **单一工具包选项**：当 DSH 中存在 `WolframLanguage` MCP 工具（以 `mcp__WolframLanguage__*` 为稳定前缀）时，工具菜单只增加一个 **「Wolfram」** 选项；勾选它即一次性激活全部 Wolfram 工具，取消勾选即全部隐藏；MCP 不存在或工具未注册时，该选项不显示。
+2. **系统指令联动**：当 Wolfram 工具对当前会话可用且已启用时，在 system prompt 中注入 Wolfram 使用规则（该调用时调用、不该调用时不调用），并说明 `~/.dsh/skills/wolfram-*/` 下的技能文档；不可用或未启用时不注入。
+3. **动态切换**：MCP 注册/工具出现时自动更新 UI、工具列表与系统指令；MCP 取消注册/工具移除时自动撤销。不采用“假定 Wolfram 永远存在”的退化方案。
+4. **统一接口**：把 shell、web search、Wolfram 抽象为同一张 **tool pack** 数据表（id、状态字段、工具发现方式、deny 文案、可选 guidance），未来增加其他动态 MCP 工具包时复用同一套发现、可用性、gate、投影与 prompt 逻辑，而不是再写一套分支。
+
+边界：
+
+- 只处理 **已注册到 DSH 工具注册表** 的工具；不直接调用 `mcpManager.register()`，也不改变 Wolfram MCP 插件本身的安装/配置。
+- Wolfram 工具按“前缀族”整体启用/禁用，不提供子工具粒度。
+- 默认仍为**全关**：新 Chat 会话的 Wolfram 选项不勾选，Wolfram 工具不出现在模型工具列表中。
+- 不改权限模型、不改 `complete: true` 的 persona 策略、不改变 shell/web_search 的既有语义与命令兼容性。
+
+## 14.2 可行性
+
+### 14.2.1 MCP 工具是全局注册、名称可稳定匹配
+
+- `@deepseek-ai/dsh-mcp-client/src/tools.ts` 的 `publicToolName()` 给出稳定命名：
+
+  ```text
+  mcp__<serverName>__<rawName>
+  ```
+
+  仅当非法字符或 64 字符上限触发时才追加 12 位 SHA-256 哈希后缀；`WolframLanguage` 与当前 6 个 Wolfram 工具都落在干净路径上。
+- 同文件 `syncTools()` 在连接成功的世代里调用 `ctx.tools.register(definition)`，并把 unregister disposer 收进 generation map；MCP 掉线/取消注册时 disposer 被调用，工具从注册表消失。
+- `@deepseek-ai/dsh-mcp-manager/src/index.ts` 的实例 `mount()` 使用 `this.ownerContext.plugin(McpClient, …)`，即挂在 **mcp-manager 的 fiber** 下；本 profile 的 mcp-manager 是 root 行，因此 MCP 工具是 **global** 工具，Chat preset 的 Agent 继承可见。
+- 本会话 `cordis_inspect_query`（`Tool.listTools`）实测存在 6 个 `mcp__WolframLanguage__*` 工具：`WolframLanguageContext`、`WolframLanguageEvaluator`、`ReadNotebook`、`WriteNotebook`、`SymbolDefinition`、`CodeInspector`、`TestReport`；`~/.dsh/skills/wolfram-{language,notebooks,paclets,debugging}` 均存在。
+
+### 14.2.2 工具注册表提供变化的统一触发器
+
+- `@deepseek-ai/dsh-tools/src/index.ts`：`ToolsService` 的每个 scope layer 由 `ScopedLayers(…, () => { this.ctx.emit('tools/change') })` 驱动；`register()`、`restrict()`、disposer 都会触发 `tools/change`。
+- Inspect 的 Event 契约确认：
+
+  ```text
+  'tools/change'(): void
+  ```
+
+  它是 **unfiltered registry notification**：scoped listener 也会收到任意 scope 的变化，因为全局贡献会影响每个 Agent 的下一次 assembly。
+- `ToolsService.definitions(scope?)`：
+  - 无 `scope` → global view；
+  - 传 `agent` → 该 Agent 的可见视图（已应用 restriction）。
+
+  这两点正好分别用于“发现工具是否存在”（不能被自己的 deny 影响）与“按 Agent 计算 deny 集合”。
+- `ToolsService.restrict(filter)` 要求 **scoped context**，并且 `deny` 中的每个名字必须在当前 `restrictableNames`（继承的 global/ancestor 工具）中，否则 throw。当前 `preset.js` 已按“先发现、再 restrict”的方式工作；本轮只需扩展发现逻辑。
+
+### 14.2.3 会话投影可以把“可用性”推送到浏览器
+
+- `@deepseek-ai/dsh-session-projection/src/index.ts`：
+  - `ProjectionDefinition` 由 `init` + 纯同步 `apply(state, event)` + 可选 `wire.view` 定义；
+  - `stateVersion` 只在“状态字段或折叠语义变化”时提升；**可选新增字段**只要“缺失时历史含义不变、旧 checkpoint 的后缀 replay 等价于全量 replay”即可保持版本。
+  - 现有 `chatMode` 投影 key 已注册；客户端已通过 `useProjection('chatMode')` 读取。
+- `@deepseek-ai/dsh-session/src/index.ts`：`session.append()` 允许插件事件，但
+  - `session/created` 同步 dispatch 期间 Session 只读；
+  - **不能在一个 append 的发布过程中重入 append**（`publicationEntry().appending` 会 throw）。
+
+  因此可用性事件必须在 microtask 中、带 try/catch 地追加。
+- 现有 `preset.js` 已经用 log-only 的 `chat-mode/tools` 事件 + 投影驱动 UI，说明这条链路在本版本可用。
+
+### 14.2.4 system prompt 支持“按 Assembly 求值”的变量
+
+- `@deepseek-ai/dsh-system-prompt/src/index.ts`：
+  - `systemPrompt.variable(name, provider)` 注册 `[a-z][a-z0-9_]*` 变量，provider 每次 `assemble()` 调用；
+  - `assemble()` 先收集 global variables，再按 scope chain **由远及近覆盖**，最近的 scope 胜出；
+  - `renderPrompt()` 对每个 section（包括 `complete: true` 的 section）做严格 `{{name}}` 插值，空字符串合法；未知变量才会 throw。
+- `@deepseek-ai/dsh-persona/src/index.ts` 的 `complete: true` 只是“用该 section 作为唯一 prompt section”，不会跳过变量插值。
+- `@deepseek-ai/dsh-agent/src/dispatch.ts` 的 `assembleContextFor(agent, signal)` 返回 `{ agent, scope: agent, signal? }`，因此变量 provider 可以读到 `context.agent`，再读该会话的 `chatMode` 状态。
+- 结论：**不改 persona 结构、不把 `complete` 设为 false**，只在 persona 文本中放一个 `{{chat_tool_guidance}}`，由 plugin 在 preset scope 注册其 provider；provider 根据“工具包可用 + 当前会话已启用”返回文本或空串，即可实现系统指令的动态切换。
+- 为防“preset 插件未挂载/加载失败导致变量不存在、prompt 直接 throw”，Host 半在 global scope 注册同名变量返回 `''` 作为 fallback；preset scope 的同名变量按 scope 规则覆盖它。
+
+### 14.2.5 预设作用域是 Agent 作用域的祖先
+
+- `@deepseek-ai/dsh-agent-preset-registry/src/index.ts` 的 `join()` 使用 `bindScopeParent(key, generation.key)` 把 Agent scope 绑到 preset revision scope。
+- 因此 preset 插件注册的 prompt variable、以及 `agent/created` / `session/event` / `tools/change` 监听，都能覆盖该 preset 的 Agent；这一点与现有 `/permission`、工具 restriction 的实现一致。
+
+### 14.2.6 客户端菜单仍按 `TOOL_ITEMS` 数据驱动
+
+- 上一轮已确认 shipped `Menu` 支持 `items` + `selectedIds` + `selection: 'check'`，item `onSelect` 不自动关闭菜单。
+- 因此新增一个 Wolfram item、按可用性过滤 items、把触发器标签从“固定组合”改为“选中项标签 join”，均不需要新组件或新交互。
+- `WolframMcpIcon` 是 `@local/dsh-wolfram-mcp/client.js` 内的纯函数 React 组件（无依赖、`currentColor`、16×16 viewBox），可直接复制到本插件 `client.js`，无需新增 `dsh.client.inject` 包。
+
+## 14.3 核心进路
+
+### 14.3.1 Host 半：一张 tool pack 表 + 通用发现/gate
+
+`preset.js` 顶部定义：
+
+```js
+const TOOL_PACKS = [
+  {
+    id: 'shell',
+    stateKey: 'shell',
+    names: () => [shellToolName()],
+    denyReason: '…在对话设置中启用“持久终端”…',
+  },
+  {
+    id: 'search',
+    stateKey: 'webSearch',
+    names: () => ['web_search'],
+    denyReason: '…在对话设置中启用“联网搜索”…',
+  },
+  {
+    id: 'wolfram',
+    stateKey: 'wolfram',
+    prefix: 'mcp__WolframLanguage__',
+    denyReason: '…在对话设置中启用“Wolfram”…',
+    guidance: WOLFRAM_GUIDANCE,
+  },
+]
+```
+
+统一函数：
+
+- `globalToolNames(ctx)`：`ctx.tools.definitions()`（global view，不受 Agent restriction 影响）。
+- `packNames(ctx, pack, agent?)`：
+  - `prefix` 包：从 **global view** 过滤前缀。选择 global 而不是 `agent` view，避免“上一轮自己的 deny 把工具隐藏后误判为不存在”；
+  - `names` 包：返回静态名字，再按 `agent.ctx.tools.get(name, agent)` 过滤存在性（这些工具由 preset scope 提供）。
+- `packAvailable(ctx, pack)`：`prefix` 包 = 发现到的名字非空；静态包 = 始终 true（保持现有 UI：持久终端/联网搜索永远显示，是否可用由 gate 决定）。
+- `packForTool(name)`：供 `tools/pre-execute` guard 反查工具属于哪个包。
+- `applyRestrictions(agent, state)`：
+  - deny = 所有 `state[pack.stateKey] !== true` 的包所发现的工具名；
+  - 对 `names` 包沿用“首次成功发现后缓存 `known`”的做法（因为 restrict 后它会被自己的视图隐藏）；
+  - 对 `prefix` 包每次重新发现（MCP 工具可增删）；
+  - key（排序后的 deny 列表）不变则不重建 restriction，避免 `tools/change` 自激。
+
+### 14.3.2 Host 半：状态、可用性与事件
+
+`chatMode` 投影状态扩展为：
+
+```js
+{
+  shell: false,
+  webSearch: false,
+  wolfram: false,
+  availability: {},        // 例如 { wolfram: true }
+}
+```
+
+- 既有 `chat-mode/tools` 事件新增可选的 `wolfram` 字段；旧日志缺失时按 `false`。
+- 新增 log-only 事件 `chat-mode/availability`，data 为 `{ availability: { wolfram: boolean } }`，`apply` 合并到 state.availability。
+- `stateSchema.parse` 做宽松归一化：缺失 `wolfram` / `availability` 时补默认值，类型错误仍 throw。这样旧 projection checkpoint 可以继续 seed，且后缀 replay 与全量 replay 等价，**stateVersion 保持 1**（按 projection 文档的可选新增规则）。
+- `wire.view` 输出四个字段，客户端据此决定是否显示 Wolfram item。
+- `packAvailable` 变化时：
+  - 在 `agent/created`、`tools/change`、`agent-preset/selected` 后，遍历当前已知 Chat Agent，比较 `projection.stateOf(session).availability[pack.id]`；
+  - 不一致则 `queueMicrotask` 调度一次 append，按 session 去重，append 失败只 warn；
+  - 同时按最新工具集合重新 `applyRestrictions`（工具出现时若未启用立即 deny；工具消失时 deny 列表自然收缩，不会因未知名字 throw）。
+- `agents` 表中的条目本身就是“该会话已登记为 Chat”的权威标记：`syncAvailability` / `tools/change` 只处理仍在表中的会话；registry 全局重发的 `agent-preset/selected` 在切到非 Chat 时 dispose 该条目的 restriction 并从表里删除，避免 Chat 的 deny 残留到其他 preset。注意 **不要**用 `session.header.agentPreset` 判断（该 header 是创建时元数据，切换后不会更新）。
+- `/chat-tools` 扩展语法：
+
+  ```text
+  /chat-tools wolfram on|off
+  /chat-tools mode off|shell|search|both|wolfram|all
+  ```
+
+  启用不可用的 pack 返回错误；`mode both` 仍只表示 shell+search，保持兼容；`mode all` 表示三个都开。
+
+### 14.3.3 系统指令：preset 变量 + global fallback
+
+- `index.js` 的 `inject` 增加 `systemPrompt`，并注册 global fallback：
+
+  ```js
+  ctx.systemPrompt.variable('chat_tool_guidance', () => '')
+  ```
+
+- `preset.js` 的 `inject` 增加 `systemPrompt`、`tools`；在 `apply()` 一开始（任何 await 之前）注册同名变量：
+
+  ```js
+  ctx.systemPrompt.variable('chat_tool_guidance', (context) => {
+    const agent = context?.agent
+    if (agent === undefined) return ''
+    const state = stateOf(agent.session)          // 含 pending
+    return TOOL_PACKS
+      .filter(pack => pack.guidance !== undefined
+        && state[pack.stateKey] === true
+        && packAvailable(ctx, pack))
+      .map(pack => pack.guidance)
+      .join('\n\n')
+  })
+  ```
+
+- `cordis.patch.yml` 的 persona prefix 在“工具使用原则”之后加入一行：
+
+  ```text
+  {{chat_tool_guidance}}
+  ```
+
+- Wolfram guidance 文本（中文）包含：
+
+  - 当前会话已启用 Wolfram Language 工具，直接调用即可；
+  - **应当调用**：具体明确的计算任务、符号推理、形式化变换；
+  - **不应当调用**：观点性问题、创意写作、纯粹的语言任务、近似推理即可满足要求；
+  - 技能文档位于 `~/.dsh/skills/wolfram-*/`（`wolfram-language`、`wolfram-notebooks`、`wolfram-paclets`、`wolfram-debugging`），需要细节时先读对应 `SKILL.md`。
+
+- 可用性证据来自每次 assembly 时的工具注册表，因此 MCP 注册/移除后，下一次 step 自动切换，无需额外的 prompt 失效广播。
+
+### 14.3.4 客户端
+
+- 复制 `WolframMcpIcon`（`dsh-wolfram-mcp/client.js`）到本插件 `client.js`。
+- `TOOL_ITEMS` 增加：
+
+  ```js
+  {
+    id: 'wolfram',
+    stateKey: 'wolfram',
+    labelKey: 'tools.wolfram',
+    icon: WolframMcpIcon,
+    availableKey: 'wolfram',
+  }
+  ```
+
+- 可见 items **只按已落盘的 availability 过滤，不能用 `pendingTools`**（否则点击 Wolfram 后 pending 更新、availability 暂时缺失，菜单项会瞬间消失）：
+
+  ```js
+  const availability = liveTools.availability ?? {}
+  const visibleItems = TOOL_ITEMS.filter(item =>
+    item.availableKey === undefined
+      || availability[item.availableKey] === true)
+  ```
+
+- 触发器标签改为“选中项标签 join（`+`）”，空选中为“全部关闭”；不再维护 `tools.both` 这种组合文案。
+- locale 增加 `tools.wolfram`（中英文均显示 `Wolfram`）。
+- 菜单仍保持多选、点击不关闭；服务端状态更新通过 `chatMode` 投影自动回流，保留现有 `pendingTools` 乐观更新。
+
+### 14.3.5 兼容性
+
+- 旧会话日志：`chat-mode/tools` 事件没有 `wolfram`；投影归一化为 false。
+- 旧客户端刷新后拿到新 client.js；若 Host 尚未重启，`availability` 字段缺失时 Wolfram item 隐藏，其他两个菜单项不受影响。
+- `/chat-tools mode off|shell|search|both` 语法保持；新增值不冲突。
+- shell/web_search 的 gate、pre-execute 文案、权限逻辑均不改；只把原 `gateReason` 统一到 pack 表。
+
+## 14.4 问题与解决办法（预判）
+
+| 问题 | 根因 | 拟定修法 |
+| --- | --- | --- |
+| 可用性事件在 append 发布中重入，throw | `session.append()` 禁止发布期间重入 | `queueMicrotask` + 每 session 去重 + try/catch；不在 `session/event` 同步阶段 append |
+| 自己的 deny 让 `agent` 视图看不到 Wolfram 工具，误判“不可用”或反复 lift/restrict | `definitions(agent)` 会应用 restriction | 发现动态工具统一用 global view `ctx.tools.definitions()`；restriction 只用发现结果，不用 agent 视图判断存在性 |
+| MCP 工具移除后旧 deny 列表含未知名字，`restrict()` throw | `restrict()` 校验 `restrictableNames` | 每次 `applyRestrictions` 重新发现并只对当前存在的名字 restrict；key 变化时先 dispose 旧 restriction 再注册新的 |
+| 自身 `restrict()` 触发 `tools/change` 造成循环 | 事件是 unfiltered registry notification | `entry.key` 在调用 `restrict()` 之前写入；key 相同直接 return（沿用现有做法） |
+| 旧 projection checkpoint 缺新字段导致 parse 失败 | stateSchema 变严 | `parse` 归一化缺失字段；保持 `stateVersion: 1`，并用“旧日志 replay 等价”测试覆盖 |
+| persona 引用了未注册变量，prompt assembly 直接报错 | `{{name}}` 是严格插值 | Host 半在 global scope 注册 fallback `() => ''`；preset scope 变量覆盖它；即使 preset 插件加载失败也不会打断 prompt |
+| `complete: true` 把新增 section 抑制掉 | persona prefix 是唯一 section | 不新增 section；把 guidance 作为 persona prefix 内的变量插值 |
+| Wolfram MCP 启动慢，首轮没有工具 | 工具注册晚于 Agent 创建 | 不显示假选项；`tools/change` 到达后自动补 restriction 与 availability，下一 step prompt 同步出现 guidance |
+| 当前 batch 在 restriction 变化前已解析，模型仍能调用 | agent loop 在 pre-step 前 resolve 工具集 | 扩展现有 `tools/pre-execute` guard：Wolfram 前缀工具在未启用时返回 deny 文案，提示在“对话设置”中启用 |
+| 切换到其他 preset 后 Chat 的 restriction 仍被 `tools/change` 重放 | `agents` 表按 session 保存，切换 preset 时不会自动清空；`SessionHeader.agentPreset` 又是不可变创建元数据 | 以 `agents` 表为 Chat 标记；registry 全局重发的 `agent-preset/selected` 在切到非 Chat 时 dispose 并删除条目 |
+| 工具名超过 64 字符时前缀仍匹配，但子工具名带 hash | `publicToolName()` 的归一化规则 | 只按 `mcp__WolframLanguage__` 前缀匹配，不解析 raw name |
+| 动态工具注册在非 global scope 时 global view 发现不到 | 当前 `mcpManager` 在 root fiber 挂载 mcp-client | 本版本按“MCP 工具为 global”实现并在 README 记录边界；未来若出现 preset-scope MCP，可把 `discover` 改为可注入策略 |
+
+## 14.5 实施步骤（下一轮）
+
+1. `preset.js`：TOOL_PACKS、发现/可用性/gate 函数、`applyRestrictions` 重构、state/投影/availability 事件、命令语法、prompt variable。
+2. `index.js`：inject `systemPrompt`，注册 `chat_tool_guidance` 的 global fallback。
+3. `cordis.patch.yml`：persona prefix 插入 `{{chat_tool_guidance}}`。
+4. `client.js`：复制 `WolframMcpIcon`、TOOL_ITEMS 增加 Wolfram、按 availability 过滤、触发器标签 join、locale。
+5. `scripts/test.mjs` / `scripts/client-test.mjs` / `scripts/host-contract.mjs`：更新 stub 与断言，覆盖动态注册/移除、启用/禁用、旧状态兼容、prompt variable。
+6. `README.md`：工具菜单、动态工具包、系统指令、故障排查、版本契约；首行 Harness 版本保持 `0.2.2-rc.3`。
+7. `package.json`：版本 `1.1.2` → `1.2.0`。
+8. `npm test`、`npm run build`；Host/preset 变化需重启 DSH，Client 刷新页面；重启后做 GUI 与真实 MCP 的运行时验收，再回填本节实施记录。
+
+## 14.6 验证与验收
+
+**自动化**：
+
+- Host 逻辑测试：
+  - 默认状态下，三个 pack 的 deny 列表为 `['bash','web_search','mcp__WolframLanguage__…']`（存在 Wolfram 工具时）；
+  - 模拟 `tools/change` 注册 Wolfram 工具后自动追加 deny，模拟移除后 deny 收缩且不 throw；
+  - `/chat-tools wolfram on` 只解除 Wolfram deny，`off` 重新 deny；
+  - 不可用时启用返回 error；
+  - `chat-mode/availability` 事件产生投影变化；
+  - 旧 `{shell, webSearch}` 状态可 parse，`wire.view` 含新字段；
+  - prompt variable：Wolfram 可用且启用时返回 guidance，否则返回 `''`；global fallback 始终返回 `''`。
+- Client smoke：
+  - availability 缺省时 items 仍为 `['shell','search']`；
+  - availability.wolfram=true 时 items 为 `['shell','search','wolfram']`；
+  - 选中 Wolfram 后提交 `/chat-tools wolfram on`；触发器标签 join 正确；图标存在。
+- `npm run build`（含 `scripts/verify.mjs` 与 Host 探针）。
+
+**运行时（重启 DSH 后）**：
+
+1. 新建 Chat 会话：工具菜单出现“Wolfram”，默认未勾选；模型工具列表中没有 `mcp__WolframLanguage__*`；system prompt 无 Wolfram guidance。
+2. 勾选“Wolfram”：模型下一 step 的工具列表出现全部 Wolfram 工具；system prompt 出现使用规则与技能路径。
+3. 取消勾选：工具消失；再调用被 `tools/pre-execute` deny 并提示在“对话设置”启用。
+4. 禁用 `dsh-wolfram-mcp`（或断开 MCP）：无需刷新页面，菜单项自动消失，guidance 在下一 step 消失；重新启用后菜单项恢复，若之前已勾选则恢复启用状态。
+5. 在 Wolfram 工具注册前已创建的 Chat 会话：工具出现后自动补上 restriction（未启用时不可见）；刷新/恢复会话后 availability 正确。
+6. 权限与 shell/web search 行为回归：仅可查看/工作区内修改、`/chat-tools mode both`、预执行 guard 文案不变。
+
+## 14.7 需要确认的决策
+
+1. **guidance 与启用状态绑定**（推荐）：只有用户勾选 Wolfram 后才注入 Wolfram 使用规则；理由是未启用时工具不在模型工具列表中，注入“应当调用”会造成模型尝试被 deny。若希望“只要 MCP 存在就注入、仅在没有工具时才不注入”，可改成只看 `packAvailable`，但 UI 未启用时 guidance 会与工具列表不一致。
+2. **Wolfram 默认关闭**：与其余两项一致，由用户显式勾选；不默认开启。
+3. **持久化**：`wolfram` 选择与会话日志一起持久化，resume/fork 保留；MCP 暂时不可用期间保留勾选状态，恢复后自动重新生效。
+
+## 14.8 实施记录（2026-11-18）
+
+### 14.8.1 实际改动
+
+- `preset.js`
+  - 新增 `TOOL_PACKS`（shell / search / wolfram）与统一函数 `globalToolNames`、`packAvailable`、`availabilityOf`、`packToolNames`、`packForTool`、`isGated`、`gateReason`；
+  - `chatMode` 投影扩展为 `{ shell, webSearch, wolfram, availability }`；`stateSchema.parse` 对旧 `{ shell, webSearch }` 归一化，`stateVersion` 保持 1；
+  - 新增 `chat-mode/availability` 事件与 microtask 去重 append；`tools/change` 时对已登记 Chat Agent 重算 restriction 并同步 availability；
+  - `applyRestrictions` 从固定 `[shellToolName(), 'web_search']` 改为按 pack 发现：动态前缀包用 global view，静态包用 Agent view 首次发现缓存；
+  - `/chat-tools` 扩展 `wolfram on|off` 与 `mode wolfram|all`；不可用时启用返回 error；
+  - 注册 preset scope 的 `chat_tool_guidance` prompt 变量，仅在“包可用 + 会话已启用”时返回 Wolfram guidance；
+  - `agent-preset/selected`（全局重发）切走时清理 session 条目并 dispose restriction；`session/event` 切到 chat 时立即 apply。
+- `index.js`
+  - `inject` 增加 `systemPrompt`；注册 global `chat_tool_guidance` fallback（返回 `''`），避免 preset 插件缺失时 strict 插值 throw。
+- `cordis.patch.yml`
+  - persona prefix 在工具原则之后加入 `{{chat_tool_guidance}}`。
+- `client.js`
+  - 从 `dsh-wolfram-mcp/client.js` 复制 `WolframMcpIcon`；
+  - `TOOL_ITEMS` 增加 `wolfram` 项（`availableKey: 'wolfram'`），按 `liveTools.availability` 过滤；
+  - 触发器标签改为选中项 `join(' + ')`，删除 `tools.both` 固定组合文案；
+  - locale 增加 `tools.wolfram`，删除 `tools.both`。
+- `scripts/test.mjs`、`scripts/client-test.mjs`、`scripts/host-contract.mjs`
+  - 更新 stub（`ctx.tools`、`systemPrompt.variable`、session header）并增加动态 Wolfram 注册/移除、整包启用/禁用、旧状态兼容、guidance 变量、切走清理与客户端可用性过滤测试。
+- `package.json`：`1.1.2` → `1.2.0`。
+- `README.md`：新增动态工具包、系统指令联动、Wolfram 故障排查；更新版本契约。
+
+### 14.8.2 与预期的差异与原因
+
+1. **不能用 `session.header.agentPreset` 判断“当前是否 Chat”**：`SessionHeader` 是创建时元数据，切换 preset 后不会更新。原计划在 `tools/change` / `syncAvailability` 中用 header 过滤，实施时发现会把“从其他 preset 切到 Chat”的会话误清掉。改为：
+   - `agents` 注册表本身就是“已登记为 Chat”的权威标记；
+   - 切换走时依靠 registry 全局重发的 `agent-preset/selected` 清理条目；
+   - `syncAvailability` 只处理仍在 `agents` 中的会话。
+2. **可用性不能进入乐观更新**：点击 Wolfram 时 `pendingTools` 不含 `availability`，若用 `effectiveTools.availability` 过滤会让菜单项瞬间消失。实施为固定读取 `liveTools.availability`，pending 只参与选中状态。
+3. **静态包与动态包的发现路径必须分开**：`agent.ctx.tools` 视图会应用自身 restriction，静态包若每次从该视图发现，会在 deny 后误判“工具不存在”并 lift mask，形成循环；因此静态包首次发现后缓存，动态包（Wolfram）从 global view 每次重查。
+4. **prompt 变量的注册顺序**：`packToolNames` 必须在 `systemPrompt.variable(...)` 之前定义（虽然 provider 在后续 assembly 才执行，但为避免同步重入的 TDZ 风险，实施时已前移）。
+5. **restriction 的 lift 会同步 emit `tools/change`**：`dsh-scope` 的 `ScopedLayers.effect` 在 undo 后立即调用 `onChange()`。若先 dispose 再更新 `entry.key`，监听器会看到旧 key 并重新安装一个未跟踪的 restriction。实施时改为先更新 key（以及先删除 `agents` 条目）再 dispose，并把测试 stub 的 `restrict`/lift 也改成同步 emit `tools/change`，让这条路径在单元测试中可复现。
+
+### 14.8.3 遇到的问题与修法
+
+| 问题 | 实际发现 | 修法 |
+| --- | --- | --- |
+| 切换 preset 后 header 仍为旧值 | 源码确认 `SessionHeader.agentPreset` 只在创建时写入 | 用 `agents` 注册表 + 全局 `agent-preset/selected` 清理 |
+| 可用性 append 可能重入 session append | `Session.append()` 在 `appending` 时 throw | microtask + `availabilityQueue` 去重 + try/catch |
+| 自身 restriction 触发 `tools/change` 递归 | `restrict()` 会 emit 全局 `tools/change` | `entry.key` 先写入；key 相同直接 return |
+| lift 时 `tools/change` 重入导致重复 restriction | `ScopedLayers.effect` 在 undo 后同步 `onChange()` | 先更新 key / 先删除条目，再 dispose；测试 stub 也同步 emit |
+| 工具移除后旧 deny 名字导致 `restrict()` throw | `restrict()` 校验 `restrictableNames` | 每次重新发现当前存在的名字；移除后 key 自然收缩 |
+| 旧会话投影 cache 缺新字段 | `stateSchema.parse` 严格校验会失败 | parse 归一化缺失字段；测试覆盖旧 `{shell, webSearch}` |
+| 未启用 Wolfram 却出现“应当调用”指令 | guidance 只看可用性会与工具列表矛盾 | provider 同时检查 `state[pack.stateKey] === true` 与可用性 |
+
+### 14.8.4 验证结果
+
+- `npm test`：`chat-mode preset: all logic checks passed`、`chat-mode client: all smoke checks passed`。
+- `npm run build`：`verify · all checks passed`，含目录/清单/导出、Host 探针、persona 变量引用、preset inject 列表与测试。
+- 未做运行时验证：`index.js` / `preset.js` / `cordis.patch.yml` 的改动属于 Host/预设组合变化，**必须重启 DSH** 才生效；Client 半刷新页面生效。
+- 待重启后验证：
+  1. 新建 Chat 会话，工具菜单出现 Wolfram、默认不勾选、模型工具列表无 `mcp__WolframLanguage__*`、prompt 无 Wolfram 段；
+  2. 勾选 Wolfram 后下一 step 出现全部 Wolfram 工具与 guidance；
+  3. 取消勾选后工具消失，手动调用得到 deny；
+  4. 禁用/重连 MCP 时菜单项与 guidance 自动跟随，无需刷新；
+  5. shell/web_search/权限行为回归。

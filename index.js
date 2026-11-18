@@ -8,11 +8,15 @@
  * - pin a fresh Chat session to `read-only` as soon as the session exists, so
  *   the blank new-session screen and the first request both see the intended
  *   permission instead of the composition default `workspace-write`;
- * - repeat that pin when a blank session is switched to Chat.
+ * - repeat that pin when a blank session is switched to Chat;
+ * - register an empty global fallback for the chat tool-guidance prompt
+ *   variable, so a missing/disabled preset plugin can never make the strict
+ *   `{{chat_tool_guidance}}` interpolation in the chat persona throw.
  *
  * The preset-scope plugin (`./preset`) still owns the per-Agent permission
- * shadow, tool restrictions, projection, and commands. Keeping this half
- * import-free keeps the package's dependency tree empty.
+ * shadow, tool restrictions, projection, commands, and the real guidance
+ * value (registered in the preset scope, which shadows this fallback). Keeping
+ * this half import-free keeps the package's dependency tree empty.
  */
 
 /** Stable Loader identity; equals the bundle patch id and the settings-free entry id. */
@@ -21,8 +25,11 @@ export const ENTRY_ID = 'dsh-chat-mode';
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-chat-mode';
 
-/** The permission service is the only Host service this early pin needs. */
-export const inject = ['permissionPresets'];
+/** The permission service and prompt registry this early half needs. */
+export const inject = ['permissionPresets', 'systemPrompt'];
+
+/** Prompt variable consumed by the Chat persona prefix. */
+const CHAT_GUIDANCE_VARIABLE = 'chat_tool_guidance';
 
 /**
  * Pin one fresh Chat session to `read-only`. Seeded (restored/forked) sessions
@@ -50,8 +57,14 @@ function pin(ctx, session, bySelection = false) {
   }
 }
 
-/** Host row: session-level early permission pin. */
+/** Host row: session-level early permission pin and prompt fallback. */
 export function apply(ctx) {
+  // Global fallback only: the preset-scope plugin registers the real provider
+  // and shadows this entry for Chat Agents. Keeping a fallback here makes the
+  // persona's strict variable reference safe even when the preset half is
+  // disabled, still loading, or failed.
+  ctx.systemPrompt.variable(CHAT_GUIDANCE_VARIABLE, () => '');
+
   // `session/created` dispatch keeps the Session read-only: an append made
   // synchronously by a creation listener throws. Defer one microtask so the
   // announcement has completed but the first prompt has not started.
