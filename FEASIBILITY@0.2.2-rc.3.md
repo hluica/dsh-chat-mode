@@ -2115,3 +2115,65 @@ const TOOL_PACKS = [
   5. **切换 preset 路径成功**：会话 header 仍是创建时的 `ptc`，但切到 `chat` 后 restriction、投影与 guidance 均按 Chat 生效，验证了“不能用不可变 header 判断当前 Chat”的修复。
 - 未在 GUI 中手工复测“再次勾选恢复”（与首次启用同一代码路径）；未对真实 MCP 插件做禁用/重连测试，`tools/change` 触发的工具移除路径由 `scripts/test.mjs` 的模拟移除用例覆盖。
 - shell / web_search / 权限行为未出现回归：本会话由 `ptc` 切到 `chat` 后，`chatMode` 投影与 `/chat-tools` 命令均正常。
+
+## 14.9 修复：自定义会话事件导致会话无法重开（2026-11-18）
+
+### 14.9.1 现象与根因
+
+重启 DSH 后打开上一轮测试的 Chat 会话失败：
+
+```text
+历史加载失败：failed to observe session "session-1fcff9ca-…":
+session "session-1fcff9ca-…" contains event type "chat-mode/availability" (seq 7)
+unknown to this harness and not marked ignorable; refusing to interpret the log
+```
+
+根因在 `@deepseek-ai/dsh-session` 的持久化读取契约：
+
+- `known-event-types.ts` 的 `KNOWN_SESSION_EVENT_TYPES` 只包含 `SessionEventMap` 的成员；读取器遇到集合外的类型时，只有事件顶层 `ignorable: true` 才允许跳过，否则拒绝重建会话（防止旧 reader 静默丢掉影响解释的事件）。
+- `SessionEventInput`/`Session.append()` 没有 `ignorable` 入口；只有 `appendPluginRecord()` 会写 `ignorable: true`，而 dsh-doc 的 `practices.md` 明确说明它保留给 DSH 的 experimental 包，且 Session 格式迁移只 best-effort 保留。
+- 1.2.0 用 `Session.append()` 写了 `chat-mode/tools` 与 `chat-mode/availability`，因此这些日志在重启后无法被读取。上一轮验证时它们只存在于**内存/当前进程**，没有触发重新加载，暴露得较晚。
+
+### 14.9.2 修复方案
+
+1. **激活状态改由已知命令事件重建**
+   - 删除 `chat-mode/tools` 与 `chat-mode/availability` 两种自定义事件，以及 `appendState`、pending append、open-turn 延迟写入逻辑。
+   - `chatMode` 投影折叠 `command/run` / `command/done`：
+     - `command/run` 且 `name === 'chat-tools'`：把 `commandId → args` 放入投影内部 `pending` 映射；
+     - `command/done` 且 `kind === 'success'`：用 `parseToolsCommand` 应用该参数，然后移除 pending；
+     - 失败命令只移除 pending，不改变 flag。
+   - `stateVersion` 从 1 提升到 2：折叠语义变化，旧 checkpoint 应丢弃而不是按新语义解释。
+   - 对外 `wire.view` 只返回 `{ shell, webSearch, wolfram }`，不暴露内部 pending 命令表。
+2. **可用性改为 Host HTTP 接口 + Client 轮询**
+   - `index.js` 通过可选 `ctx.inject(['webServer','connection','tools'], …)` 注册 owner-only 的 `GET /dsh-chat-mode/api/state`，返回 `{ ok: true, result: { wolfram: boolean } }`。
+   - 复用 Web server 的 owner admission（与 `dsh-wolfram-mcp` 一致）；非 GET → 405，未知路径 → 404，非 owner → 401/403。
+   - `client.js` 在 Chat 会话中每 3 秒轮询该接口；失败保留上一份快照，不写任何会话事件。最终 UI 延迟为轮询周期级，而不是即时推送。
+3. **restriction 重入防护**
+   - 命令处理时投影尚未收到 `command/done`，`stateOf` 仍是旧 flag；旧的 restriction lift 会同步 emit `tools/change`，重入的 `applyRestrictions` 会按旧 state 重新安装 stale mask。
+   - `applyRestrictions` 增加 per-entry `busy` 标志：同步发布自身 restriction 的窗口内，重入调用直接返回（该窗口内唯一可能的 registry 变化就是本次操作）。
+4. **旧日志修复**
+   - 新增 `scripts/repair-session-events.mjs`（开发工具，不随插件安装）：解压 JSONL，为 `chat-mode/tools` / `chat-mode/availability` 事件补 `ignorable: true`，生成时间戳备份后原子替换，并重新解压校验。
+   - 已修复 `session-1fcff9ca-0496-496e-b938-e70f83e5e264`：4 个 legacy 事件被标记 ignorable，备份为 `session.v4.jsonl.zstd.bak-2026-11-18T14-10-39-827Z`；修复后 67 行日志中 0 个 unknown 非 ignorable 事件。
+   - 未修复其他会话：全量扫描仅 1 个会话包含 `chat-mode/*` 事件。
+5. **版本**：`1.2.0` → `1.2.1`（bug fix，含会话日志兼容性修复）。
+
+### 14.9.3 备选与取舍
+
+| 方案 | 结论 |
+| --- | --- |
+| 用 `appendPluginRecord()` 写 `plugin:chat-mode/*` | 需要导入 `@deepseek-ai/dsh-session`，破坏本插件的零依赖 Host 半；该 API 保留给 experimental 包且迁移只 best-effort，不采用 |
+| 保留自定义事件并手动补 `ignorable` | 新代码仍会继续写不可重开的事件；只能作为旧日志修复手段，不能作为运行时方案 |
+| 用 `request/header` 推导可用性 | 新会话首轮前没有 header，MCP 动态变化也要等下一次请求；无法满足“打开会话即显示”的体验 |
+| 可用性走 HTTP + 轮询（本方案） | 无自定义事件、可动态跟随、实现简单；代价是最长 3 秒延迟和一次 owner-only GET 轮询 |
+| 激活状态走 `command/run` + `command/done`（本方案） | 使用已知事件，resume/fork 自动恢复；状态与命令执行结果一致，失败命令天然被过滤 |
+
+### 14.9.4 验证
+
+- `npm test`：preset 逻辑测试与 client smoke 测试全部通过；新增覆盖命令事件折叠、失败命令、report、旧 state parse、route、busy 重入与 no-custom-event 断言。
+- `npm run build`：`verify · all checks passed`（含 Host 探针、route 契约、persona 变量与 preset inject）。
+- 修复日志结构验证：`zstd -dc` + `KNOWN_SESSION_EVENT_TYPES` 比对，67 行、0 unknown 非 ignorable、4 个 unknown ignorable。
+- **待重启验证**：本轮改动了 `index.js` / `preset.js` / `client.js`，必须重启 DSH；重启后需确认：
+  1. 修复后的会话可以正常打开；
+  2. 工具菜单的 Wolfram 项由 `/dsh-chat-mode/api/state` 驱动，MCP 注册/移除后 3 秒内跟随；
+  3. 勾选/取消勾选后 `command/run` + `command/done` 写入日志，重启/恢复后状态保持；
+  4. 日志中不再出现任何 `chat-mode/*` 事件。

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-chat-mode",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Conversation-first Agent preset: reads files only on request, keeps shell, web search, and Wolfram MCP tools opt-in, and locks permission to read-only or workspace-write.",

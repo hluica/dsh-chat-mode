@@ -3,9 +3,12 @@
  *
  * These exercise the plugin's own decisions — permission pinning, tool
  * restrictions, dynamic tool-pack availability, command grammar, prompt
- * guidance, and the projection fold — against stubbed Cordis services. They do
- * not replace a live Web-session check; they catch the regressions that are
- * cheap to catch outside the Host.
+ * guidance, and the command-derived projection — against stubbed Cordis
+ * services. They do not replace a live Web-session check; they catch the
+ * regressions that are cheap to catch outside the Host.
+ *
+ * The harness mirrors the real command path: `command/run` is appended before
+ * the handler, `command/done` after it, and the projection folds both.
  */
 import { strict as assert } from 'node:assert'
 import { dirname, join } from 'node:path'
@@ -19,7 +22,6 @@ function harness(options = {}) {
   const {
     current: initialCurrent = 'workspace-write',
     tools: availableTools = ['bash', 'web_search'],
-    openTurn = false,
   } = options
   const events = []
   const commands = []
@@ -30,29 +32,20 @@ function harness(options = {}) {
   const handlers = new Map()
   const handlerOptions = new Map()
   let current = initialCurrent
-  let logged = { shell: false, webSearch: false, wolfram: false, availability: {} }
+  let projected = { shell: false, webSearch: false, wolfram: false, pending: {} }
   let projectionDefinition
-  let turnOpen = openTurn
+  let commandCounter = 0
 
   const session = {
     id: 's1',
     header: { agentPreset: 'chat' },
     append(type, data) {
-      events.push({ type, data })
-      if (type === 'chat-mode/tools') {
-        logged = {
-          ...logged,
-          shell: data.shell === true,
-          webSearch: data.webSearch === true,
-          wolfram: data.wolfram === true,
-        }
-      } else if (type === 'chat-mode/availability') {
-        logged = {
-          ...logged,
-          availability: { ...logged.availability, ...(data.availability ?? {}) },
-        }
+      const event = { type, data }
+      events.push(event)
+      if (projectionDefinition !== undefined) {
+        projected = projectionDefinition.apply(projected, event)
       }
-      return { type, data }
+      return event
     },
   }
 
@@ -111,7 +104,7 @@ function harness(options = {}) {
     sessionProjections: {
       async register(definition) {
         projectionDefinition = definition
-        return { stateOf: () => logged }
+        return { stateOf: () => projected }
       },
     },
     permissionPresets: {
@@ -122,7 +115,6 @@ function harness(options = {}) {
       },
     },
     agents: {
-      turnBoundaryOf() { return { openTurnStartSeq: turnOpen ? 1 : null } },
       get(id) { return id === session.id ? agent : undefined },
     },
     effect(callback) {
@@ -148,6 +140,22 @@ function harness(options = {}) {
     },
   }
 
+  /** Mirror the command runner: log run, invoke the handler, log done. */
+  function runCommand(name, args, options = {}) {
+    const definition = commands.find(entry => entry.name === name)
+    assert.ok(definition, `missing command /${name}`)
+    const commandId = `cmd-${++commandCounter}`
+    session.append('command/run', { commandId, name, args, source: { kind: 'user' } })
+    const result = definition.handler({ agent, rawInput: args })
+    const kind = options.kind ?? (result?.kind === 'success' ? 'success' : 'error')
+    session.append('command/done', {
+      commandId,
+      kind,
+      text: result?.text ?? '',
+    })
+    return result
+  }
+
   return {
     ctx,
     agent,
@@ -160,8 +168,9 @@ function harness(options = {}) {
     handlers,
     handlerOptions,
     variables,
+    runCommand,
+    get projection() { return projected },
     get projectionDefinition() { return projectionDefinition },
-    setTurnOpen(value) { turnOpen = value },
     registerTool(name) { available.add(name) },
     removeTool(name) { available.delete(name) },
     get current() { return current },
@@ -175,12 +184,6 @@ async function boot(options) {
   return h
 }
 
-/** Let deferred availability appends settle. */
-async function flush() {
-  await Promise.resolve()
-  await Promise.resolve()
-}
-
 /** Find one registered slash command by name. */
 function command(list, name) {
   const found = list.find(definition => definition.name === name)
@@ -192,7 +195,8 @@ const WOLFRAM_EVALUATOR = 'mcp__WolframLanguage__WolframLanguageEvaluator'
 const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
 
 // 1. Fresh Agent: read-only permission and both static advanced tools hidden.
-// Without Wolfram tools there is no Wolfram deny entry or menu availability.
+// Without Wolfram tools there is no Wolfram deny entry, and the projection is
+// the empty command-derived state.
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
@@ -201,12 +205,9 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
   assert.ok(command(h.commands, 'chat-tools'), '/chat-tools should be registered in the preset scope')
   assert.ok(command(h.commands, 'permission'), '/permission should be registered in the preset scope')
-  await flush()
-  assert.deepEqual(h.events.at(-1), {
-    type: 'chat-mode/availability',
-    data: { availability: { wolfram: false } },
-  })
+  assert.deepEqual(h.projection, { shell: false, webSearch: false, wolfram: false, pending: {} })
   assert.equal(h.variables.get('chat_tool_guidance')({ agent: h.agent }), '', 'no guidance when Wolfram is off')
+  assert.deepEqual(h.events, [], 'the plugin must not append plugin-defined session events')
 }
 
 // 2. Resumed Agent keeps an allowed permission; a wider one is corrected.
@@ -221,105 +222,95 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.deepEqual(h.permissionSets, ['read-only'], 'resume with a wider preset should be corrected')
 }
 
-// 3. `/chat-tools mode shell` records the event and lifts only the shell mask.
+// 3. `/chat-tools mode shell` is persisted through command/run + command/done
+// and lifts only the shell mask.
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
-  await flush()
-  const tools = command(h.commands, 'chat-tools')
-  const result = tools.handler({ agent: h.agent, rawInput: 'mode shell' })
+  const result = h.runCommand('chat-tools', ' mode shell')
   assert.equal(result.kind, 'success')
-  assert.deepEqual(h.events.at(-1), {
-    type: 'chat-mode/tools',
-    data: { shell: true, webSearch: false, wolfram: false },
+  assert.deepEqual(h.events.map(event => event.type), ['command/run', 'command/done'])
+  assert.deepEqual(h.events[0].data, {
+    commandId: 'cmd-1',
+    name: 'chat-tools',
+    args: ' mode shell',
+    source: { kind: 'user' },
   })
+  assert.equal(h.events[1].data.kind, 'success')
+  assert.deepEqual(h.projection, { shell: true, webSearch: false, wolfram: false, pending: {} })
   assert.deepEqual(h.restrictions.at(-2), { kind: 'lift', filter: { deny: ['bash', 'web_search'] } })
   assert.deepEqual(h.restrictions.at(-1), { kind: 'restrict', filter: { deny: ['web_search'] } })
 }
 
-// 4. The projection fold, backward compatibility, and wire view.
+// 4. The projection folds known command events, ignores other events, and has
+// no plugin-defined event vocabulary.
 {
   const h = await boot()
   const definition = h.projectionDefinition
-  const initial = { shell: false, webSearch: false, wolfram: false, availability: {} }
-  const next = definition.apply(initial, {
-    type: 'chat-mode/tools',
-    data: { shell: true, webSearch: true },
+  assert.equal(definition.stateVersion, 2, 'command-derived fold is stateVersion 2')
+  const initial = { shell: false, webSearch: false, wolfram: false, pending: {} }
+  const running = definition.apply(initial, {
+    type: 'command/run',
+    data: { commandId: 'cmd-9', name: 'chat-tools', args: ' mode both', source: { kind: 'user' } },
   })
-  assert.deepEqual(next, { shell: true, webSearch: true, wolfram: false, availability: {} })
-  const available = definition.apply(next, {
-    type: 'chat-mode/availability',
-    data: { availability: { wolfram: true } },
+  assert.deepEqual(running, { ...initial, pending: { 'cmd-9': ' mode both' } })
+  const done = definition.apply(running, {
+    type: 'command/done',
+    data: { commandId: 'cmd-9', kind: 'success', text: 'ok' },
   })
-  assert.deepEqual(available.availability, { wolfram: true })
-  assert.deepEqual(definition.wire.view(available), {
-    shell: true,
-    webSearch: true,
-    wolfram: false,
-    availability: { wolfram: true },
+  assert.deepEqual(done, { shell: true, webSearch: true, wolfram: false, pending: {} })
+  assert.deepEqual(definition.wire.view(done), { shell: true, webSearch: true, wolfram: false })
+
+  // A failed command removes its pending entry without changing the flags.
+  const failedRun = definition.apply(initial, {
+    type: 'command/run',
+    data: { commandId: 'cmd-10', name: 'chat-tools', args: ' wolfram on', source: { kind: 'user' } },
   })
+  assert.deepEqual(
+    definition.apply(failedRun, { type: 'command/done', data: { commandId: 'cmd-10', kind: 'error', text: 'no' } }),
+    initial,
+  )
+
+  // A report (no arguments) succeeds but changes nothing.
+  const reportRun = definition.apply(initial, {
+    type: 'command/run',
+    data: { commandId: 'cmd-11', name: 'chat-tools', args: '', source: { kind: 'user' } },
+  })
+  assert.deepEqual(
+    definition.apply(reportRun, { type: 'command/done', data: { commandId: 'cmd-11', kind: 'success', text: 'ok' } }),
+    initial,
+  )
+
+  // Other commands and old plugin-defined events are ignored by reference.
+  assert.equal(definition.apply(initial, { type: 'command/run', data: { name: 'permission' } }), initial)
+  assert.equal(definition.apply(initial, { type: 'chat-mode/tools', data: { shell: true } }), initial)
+  assert.equal(definition.apply(initial, { type: 'chat-mode/availability', data: { availability: {} } }), initial)
+
+  // Historical state (pre-v2) normalizes without the removed availability map.
   assert.deepEqual(definition.stateSchema.parse({ shell: true, webSearch: false }), {
     shell: true,
     webSearch: false,
     wolfram: false,
-    availability: {},
+    pending: {},
   })
   assert.throws(() => definition.stateSchema.parse(null))
   assert.throws(() => definition.stateSchema.parse({ shell: 'yes', webSearch: false }))
-  assert.throws(() => definition.stateSchema.parse({ shell: false, webSearch: false, availability: { wolfram: 'yes' } }))
-
-  // An old checkpoint must replay like a full replay: the normalized cached
-  // state plus later events equals folding every event from the beginning.
-  const oldCheckpoint = definition.stateSchema.parse({ shell: true, webSearch: false })
-  const later = { type: 'chat-mode/availability', data: { availability: { wolfram: true } } }
-  assert.deepEqual(
-    definition.apply(definition.stateSchema.parse(oldCheckpoint), later),
-    definition.apply(
-      definition.apply(
-        definition.apply(initial, { type: 'chat-mode/tools', data: { shell: true } }),
-        { type: 'chat-mode/tools', data: { shell: true, webSearch: false } },
-      ),
-      later,
-    ),
-  )
-
-  assert.equal(definition.apply(initial, { type: 'unrelated/event' }), initial, 'unrelated events preserve the reference')
+  assert.throws(() => definition.stateSchema.parse({ shell: false, webSearch: false, pending: { cmd: 1 } }))
 }
 
 // 5. `/permission` refuses full access and accepts the two allowed presets.
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
-  const permission = command(h.commands, 'permission')
-  const refused = permission.handler({ agent: h.agent, rawInput: 'danger-full-access' })
+  const refused = h.runCommand('permission', ' danger-full-access')
   assert.equal(refused.kind, 'error')
   assert.deepEqual(h.permissionSets, ['read-only'], 'refusal must not change the permission')
-  const accepted = permission.handler({ agent: h.agent, rawInput: 'workspace-write' })
+  const accepted = h.runCommand('permission', ' workspace-write')
   assert.equal(accepted.kind, 'success')
   assert.deepEqual(h.permissionSets, ['read-only', 'workspace-write'])
 }
 
-// 6. During an open Turn the choice stays pending until the next accepted pre-step.
-{
-  const h = await boot({ openTurn: true })
-  h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
-  await flush()
-  const tools = command(h.commands, 'chat-tools')
-  const queued = tools.handler({ agent: h.agent, rawInput: 'mode both' })
-  assert.equal(queued.kind, 'success')
-  assert.match(queued.text, /applies from the next step/u)
-  assert.equal(h.events.some(event => event.type === 'chat-mode/tools'), false, 'no append while the Turn is open')
-  await h.handlers.get('agent/pre-step')(
-    { agent: h.agent, signal: new AbortController().signal },
-    async () => ({ kind: 'enter' }),
-  )
-  assert.deepEqual(h.events.at(-1), {
-    type: 'chat-mode/tools',
-    data: { shell: true, webSearch: true, wolfram: false },
-  })
-}
-
-// 7. The pre-execute guard denies a disabled gated tool and allows an enabled one.
+// 6. The pre-execute guard denies a disabled gated tool and allows an enabled one.
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
@@ -327,15 +318,14 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   const denied = await guard({ agent: h.agent, name: 'bash' }, async () => ({ kind: 'allow' }))
   assert.equal(denied.kind, 'deny')
   assert.match(denied.reason, /持久终端/u)
-  const tools = command(h.commands, 'chat-tools')
-  tools.handler({ agent: h.agent, rawInput: 'mode shell' })
+  h.runCommand('chat-tools', ' mode shell')
   const allowed = await guard({ agent: h.agent, name: 'bash' }, async () => ({ kind: 'allow' }))
   assert.equal(allowed.kind, 'allow')
   const webDenied = await guard({ agent: h.agent, name: 'web_search' }, async () => ({ kind: 'allow' }))
   assert.equal(webDenied.kind, 'deny')
 }
 
-// 8. The creation listener is prepend, and a late tool registration is caught by tools/change.
+// 7. The creation listener is prepend, and a late tool registration is caught by tools/change.
 {
   const h = await boot({ tools: [] })
   assert.equal(h.handlerOptions.get('agent/created')?.prepend, true, 'creation listener should run before ordinary observers')
@@ -348,7 +338,7 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
 }
 
-// 9. Switching an already-created Agent to Chat applies the restriction from
+// 8. Switching an already-created Agent to Chat applies the restriction from
 // the selection event, before the next tools.resolve().
 {
   const h = await boot()
@@ -361,12 +351,11 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
 }
 
-// 10. Wolfram tools appear: the pack is discovered, denied by default, exposed
-// through availability, and gated/enabled as one unit.
+// 9. Wolfram tools appear: the pack is discovered, denied by default, enabled
+// through the command path, and the guidance follows the projected flags.
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
-  await flush()
   assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
 
   h.registerTool(WOLFRAM_EVALUATOR)
@@ -375,31 +364,22 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.deepEqual(h.restrictions.at(-1).filter, {
     deny: ['bash', 'web_search', WOLFRAM_EVALUATOR, WOLFRAM_CONTEXT],
   })
-  await flush()
-  assert.deepEqual(h.events.at(-1), {
-    type: 'chat-mode/availability',
-    data: { availability: { wolfram: true } },
-  })
 
-  const tools = command(h.commands, 'chat-tools')
   const guard = h.handlers.get('tools/pre-execute')
   const denied = await guard({ agent: h.agent, name: WOLFRAM_EVALUATOR }, async () => ({ kind: 'allow' }))
   assert.equal(denied.kind, 'deny')
   assert.match(denied.reason, /Wolfram/u)
 
-  const enabled = tools.handler({ agent: h.agent, rawInput: 'wolfram on' })
+  const enabled = h.runCommand('chat-tools', ' wolfram on')
   assert.equal(enabled.kind, 'success')
+  assert.deepEqual(h.projection, { shell: false, webSearch: false, wolfram: true, pending: {} })
   assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
-  assert.deepEqual(h.events.at(-1), {
-    type: 'chat-mode/tools',
-    data: { shell: false, webSearch: false, wolfram: true },
-  })
   const allowed = await guard({ agent: h.agent, name: WOLFRAM_EVALUATOR }, async () => ({ kind: 'allow' }))
   assert.equal(allowed.kind, 'allow')
   assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /Wolfram 工具/u)
   assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /wolfram-\*/u)
 
-  const disabled = tools.handler({ agent: h.agent, rawInput: 'wolfram off' })
+  const disabled = h.runCommand('chat-tools', ' wolfram off')
   assert.equal(disabled.kind, 'success')
   assert.equal(h.variables.get('chat_tool_guidance')({ agent: h.agent }), '')
   assert.deepEqual(h.restrictions.at(-1).filter, {
@@ -407,33 +387,23 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   })
 }
 
-// 11. Wolfram tools disappear: availability flips back and the next restriction
-// drops the now-unknown names instead of throwing.
+// 10. Wolfram tools disappear: the next restriction drops the now-unknown
+// names instead of throwing, and enabling the pack returns an error.
 {
   const h = await boot({ tools: ['bash', 'web_search', WOLFRAM_EVALUATOR] })
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
-  await flush()
   assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search', WOLFRAM_EVALUATOR] })
-  assert.deepEqual(h.events.at(-1), {
-    type: 'chat-mode/availability',
-    data: { availability: { wolfram: true } },
-  })
 
   h.removeTool(WOLFRAM_EVALUATOR)
   h.handlers.get('tools/change')()
   assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
-  await flush()
-  assert.deepEqual(h.events.at(-1), {
-    type: 'chat-mode/availability',
-    data: { availability: { wolfram: false } },
-  })
-  const tools = command(h.commands, 'chat-tools')
-  const rejected = tools.handler({ agent: h.agent, rawInput: 'wolfram on' })
+  const rejected = h.runCommand('chat-tools', ' wolfram on')
   assert.equal(rejected.kind, 'error')
   assert.match(rejected.text, /not available/u)
+  assert.deepEqual(h.projection, { shell: false, webSearch: false, wolfram: false, pending: {} })
 }
 
-// 12. Switching away from Chat disposes the restriction and stops replays.
+// 11. Switching away from Chat disposes the restriction and stops replays.
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
@@ -448,7 +418,7 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.equal(h.restrictions.length, before + 1, 'no restriction should be replayed after the switch')
 }
 
-// 13. The registry's global selection event is the fallback cleanup path for a
+// 12. The registry's global selection event is the fallback cleanup path for a
 // switch that the preset revision's own session/event listener does not observe.
 {
   const h = await boot()
@@ -458,6 +428,21 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.equal(h.restrictions.length, before + 1, 'global selection should lift the restriction')
   h.handlers.get('tools/change')()
   assert.equal(h.restrictions.length, before + 1, 'global cleanup should stop replays')
+}
+
+// 13. A real log sequence replays to the same state from scratch.
+{
+  const h = await boot()
+  const definition = h.projectionDefinition
+  let state = definition.init()
+  const sequence = [
+    { type: 'command/run', data: { commandId: 'cmd-1', name: 'chat-tools', args: ' wolfram on', source: { kind: 'user' } } },
+    { type: 'command/done', data: { commandId: 'cmd-1', kind: 'success', text: 'ok' } },
+    { type: 'command/run', data: { commandId: 'cmd-2', name: 'chat-tools', args: ' mode both', source: { kind: 'user' } } },
+    { type: 'command/done', data: { commandId: 'cmd-2', kind: 'success', text: 'ok' } },
+  ]
+  for (const event of sequence) state = definition.apply(state, event)
+  assert.deepEqual(state, { shell: true, webSearch: true, wolfram: false, pending: {} })
 }
 
 console.log('chat-mode preset: all logic checks passed')

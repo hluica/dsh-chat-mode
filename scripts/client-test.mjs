@@ -107,12 +107,7 @@ const commands = []
 function render({
   preset = 'chat',
   permission = 'read-only',
-  tools = {
-    shell: false,
-    webSearch: false,
-    wolfram: false,
-    availability: { wolfram: false },
-  },
+  tools = { shell: false, webSearch: false, wolfram: false },
 } = {}) {
   return slot.component({
     sessionId: 's1',
@@ -157,8 +152,8 @@ assert.equal(permissionMenu.props.anchor.props.className, 'dsh-chat-trigger')
 assert.ok(triggerIcon(permissionMenu.props.anchor) !== undefined, 'permission trigger carries an icon')
 assert.match(triggerLabel(permissionMenu.props.anchor).children[0], /permission\.trigger/u)
 
-// Tools: multi-select; Wolfram is hidden until the projection reports it
-// available, so the default menu has exactly the two static items.
+// Tools: multi-select; Wolfram is hidden until the Host availability route
+// reports it, so the default menu has exactly the two static items.
 assert.deepEqual(toolsMenu.props.items.map(item => item.id), ['shell', 'search'])
 assert.deepEqual(toolsMenu.props.selectedIds, [])
 assert.equal(toolsMenu.props.selectedId, undefined)
@@ -174,26 +169,20 @@ assert.equal(dictionary.chatMode.zh['tools.wolfram'], 'Wolfram')
 assert.equal(dictionary.chatMode.zh['tools.off'], '全部关闭')
 
 // Selected ids derive from the effective state.
-const shellTools = render({ tools: { shell: true, webSearch: false, wolfram: false, availability: { wolfram: false } } })
+const shellTools = render({ tools: { shell: true, webSearch: false, wolfram: false } })
 assert.deepEqual(shellTools.children[1].props.selectedIds, ['shell'])
-const webTools = render({ tools: { shell: false, webSearch: true, wolfram: false, availability: { wolfram: false } } })
+const webTools = render({ tools: { shell: false, webSearch: true, wolfram: false } })
 assert.deepEqual(webTools.children[1].props.selectedIds, ['search'])
-const bothTools = render({ tools: { shell: true, webSearch: true, wolfram: false, availability: { wolfram: false } } })
+const bothTools = render({ tools: { shell: true, webSearch: true, wolfram: false } })
 assert.deepEqual(bothTools.children[1].props.selectedIds, ['shell', 'search'])
 assert.equal(triggerLabel(bothTools.children[1].props.anchor).children[0], 'tools.trigger({"value":"tools.shell + tools.search"})')
 
-// Wolfram appears only with availability; selecting it toggles the whole pack.
-const wolframAvailable = render({
-  tools: { shell: false, webSearch: false, wolfram: false, availability: { wolfram: true } },
-})
-assert.deepEqual(wolframAvailable.children[1].props.items.map(item => item.id), ['shell', 'search', 'wolfram'])
-assert.ok(wolframAvailable.children[1].props.items.find(item => item.id === 'wolfram').icon !== undefined)
-assert.deepEqual(wolframAvailable.children[1].props.selectedIds, [])
-const wolframSelected = render({
-  tools: { shell: false, webSearch: false, wolfram: true, availability: { wolfram: true } },
-})
-assert.deepEqual(wolframSelected.children[1].props.selectedIds, ['wolfram'])
-assert.equal(triggerLabel(wolframSelected.children[1].props.anchor).children[0], 'tools.trigger({"value":"tools.wolfram"})')
+// The availability snapshot filters the data table; the component polls the
+// Host route for it, and the smoke test exercises the pure filter directly.
+assert.equal(typeof module.visibleToolItems, 'function', 'availability filter is exported')
+assert.deepEqual(module.visibleToolItems({ wolfram: false }).map(item => item.id), ['shell', 'search'])
+assert.deepEqual(module.visibleToolItems({ wolfram: true }).map(item => item.id), ['shell', 'search', 'wolfram'])
+assert.ok(module.visibleToolItems({ wolfram: true }).find(item => item.id === 'wolfram').icon !== undefined)
 
 // Clicking a tool item toggles it without closing the menu.
 commands.length = 0
@@ -206,11 +195,8 @@ commands.length = 0
 webTools.children[1].props.onSelect('search')
 assert.deepEqual(commands, ['/chat-tools search off'])
 commands.length = 0
-wolframAvailable.children[1].props.onSelect('wolfram')
-assert.deepEqual(commands, ['/chat-tools wolfram on'])
-commands.length = 0
-wolframSelected.children[1].props.onSelect('wolfram')
-assert.deepEqual(commands, ['/chat-tools wolfram off'])
+module.visibleToolItems({ wolfram: true })
+assert.deepEqual(commands, [])
 
 // Permission picks close the menu and submit the single value.
 commands.length = 0

@@ -52,6 +52,28 @@ export async function probeHost({ root, patchId, check }) {
   const calls = []
   const variables = []
   const handlers = new Map()
+  const routes = []
+  const apiCtx = {
+    webServer: {
+      register(route) {
+        routes.push(route)
+        return () => {}
+      },
+    },
+    connection: {
+      admit: () => ({ peer: { principal: { kind: 'owner' } } }),
+    },
+    tools: {
+      definitions: () => [
+        { name: 'bash' },
+        { name: 'mcp__WolframLanguage__WolframLanguageEvaluator' },
+      ],
+    },
+    effect(callback) {
+      const cleanup = callback()
+      return () => { cleanup?.() }
+    },
+  }
   const ctx = {
     permissionPresets: {
       current: () => 'workspace-write',
@@ -68,12 +90,54 @@ export async function probeHost({ root, patchId, check }) {
       handlers.set(event, handler)
       return () => {}
     },
+    inject(deps, callback) {
+      if (deps.join(',') !== 'webServer,connection,tools') throw new Error(`unexpected inject deps: ${deps}`)
+      callback(apiCtx)
+      return () => {}
+    },
   }
   mod.apply(ctx)
   check('Host half registers the guidance fallback', variables.length === 1 && variables[0][0] === 'chat_tool_guidance', JSON.stringify(variables.map(([name]) => name)))
   check('the guidance fallback is empty', variables[0][1]() === '', JSON.stringify(variables[0][1]()))
   check('Host half listens for session/created', typeof handlers.get('session/created') === 'function')
   check('Host half listens for session/event', typeof handlers.get('session/event') === 'function')
+
+  // Availability route: owner-only JSON, GET only, exact path.
+  check('Host half registers the availability route', routes.length === 1
+    && routes[0].kind === 'prefix' && routes[0].path === '/dsh-chat-mode/api'
+    && typeof routes[0].handler === 'function', JSON.stringify(routes.map(route => ({ kind: route.kind, path: route.path }))))
+  const route = routes[0]
+  const response = () => {
+    const res = {
+      statusCode: 0,
+      headers: {},
+      body: '',
+      setHeader(name, value) { this.headers[name] = value },
+      end(body) { this.body = body },
+    }
+    return res
+  }
+  const ownerState = response()
+  route.handler({ method: 'GET', url: '/dsh-chat-mode/api/state' }, ownerState)
+  check('availability route returns the Wolfram flag', ownerState.statusCode === 200
+    && JSON.parse(ownerState.body).ok === true
+    && JSON.parse(ownerState.body).result.wolfram === true, ownerState.body)
+  const missingState = response()
+  apiCtx.tools.definitions = () => [{ name: 'bash' }]
+  route.handler({ method: 'GET', url: '/dsh-chat-mode/api/state' }, missingState)
+  check('availability route reports Wolfram absent', JSON.parse(missingState.body).result.wolfram === false, missingState.body)
+  apiCtx.tools.definitions = () => [{ name: 'bash' }, { name: 'mcp__WolframLanguage__WolframLanguageEvaluator' }]
+  const unauthorized = response()
+  apiCtx.connection.admit = () => ({ rejection: 401 })
+  route.handler({ method: 'GET', url: '/dsh-chat-mode/api/state' }, unauthorized)
+  check('availability route refuses a non-owner', unauthorized.statusCode === 401, String(unauthorized.statusCode))
+  apiCtx.connection.admit = () => ({ peer: { principal: { kind: 'owner' } } })
+  const wrongPath = response()
+  route.handler({ method: 'GET', url: '/dsh-chat-mode/api/other' }, wrongPath)
+  check('availability route rejects an unknown path', wrongPath.statusCode === 404, String(wrongPath.statusCode))
+  const wrongMethod = response()
+  route.handler({ method: 'POST', url: '/dsh-chat-mode/api/state' }, wrongMethod)
+  check('availability route rejects a non-GET method', wrongMethod.statusCode === 405, String(wrongMethod.statusCode))
   const flush = () => new Promise(resolve => queueMicrotask(resolve))
   const fresh = { header: { agentPreset: 'chat', isSeeded: false } }
   handlers.get('session/created')(fresh)

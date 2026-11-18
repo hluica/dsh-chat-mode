@@ -3,9 +3,10 @@
  *
  * Mounted only by sessions that select the `chat` Agent preset. It owns:
  *
- * - the `chatMode` session projection (`{ shell, webSearch, wolfram, availability }`),
- *   folded from log-only `chat-mode/tools` and `chat-mode/availability` events so
- *   resume and fork keep the user's choice and the current tool availability;
+ * - the `chatMode` session projection (`{ shell, webSearch, wolfram }`), folded
+ *   from the known `command/run` + `command/done` events of the preset-scoped
+ *   `/chat-tools` command, so resume and fork keep the user's choice without
+ *   writing any plugin-defined event type;
  * - a table of **tool packs** (shell, web search, Wolfram MCP) that share one
  *   discovery / availability / restriction / prompt-guidance path;
  * - the initial permission lock: a fresh chat session is pinned to `read-only`,
@@ -19,9 +20,11 @@
  * - the `chat_tool_guidance` prompt variable consumed by the persona prefix.
  *
  * Dynamic packs (Wolfram) are discovered from the global tool registry and
- * followed through the unfiltered `tools/change` notification. Availability is
- * pushed to the browser through the session projection instead of polling a
- * Host route.
+ * followed through the unfiltered `tools/change` notification. Their live
+ * availability reaches the browser through the Host half's
+ * `/dsh-chat-mode/api/state` route (polled by the Client half); no session event
+ * is appended, because `Session.append()` cannot mark an unknown type
+ * `ignorable` and such a log would refuse to reopen.
  *
  * The plugin is import-free on purpose: every DSH service it uses is reached
  * through the Cordis context, and the build system can keep the package's
@@ -34,11 +37,14 @@ export const name = 'chat-mode-preset';
 /** Services required before the plugin body runs. */
 export const inject = ['sessionProjections', 'permissionPresets', 'agents', 'systemPrompt', 'tools'];
 
-/** Log-only whole-value event carrying the user's tool-enablement choice. */
-const CHAT_TOOLS_EVENT = 'chat-mode/tools';
+/** Known event written when a human or model invokes a slash command. */
+const COMMAND_RUN_EVENT = 'command/run';
 
-/** Log-only event carrying the latest dynamic tool-pack availability. */
-const CHAT_AVAILABILITY_EVENT = 'chat-mode/availability';
+/** Known event written when that slash command settles. */
+const COMMAND_DONE_EVENT = 'command/done';
+
+/** The preset-scoped command whose successful runs encode the tool choice. */
+const CHAT_TOOLS_COMMAND = 'chat-tools';
 
 /** Projection key published to the browser half. */
 const CHAT_MODE_PROJECTION = 'chatMode';
@@ -97,53 +103,64 @@ const WOLFRAM_PACK = TOOL_PACKS.find(pack => pack.id === 'wolfram');
 /** The two permission presets a chat session may use. */
 const ALLOWED_PERMISSIONS = new Set(['read-only', 'workspace-write']);
 
-/** Allowed availability-map keys (the same shape as prompt variable names). */
-const AVAILABILITY_KEY = /^[a-z][a-z0-9_]*$/;
-
-/** Activation flags off and no tool pack marked available. */
+/** Activation flags off and no command awaiting its `command/done`. */
 const DEFAULT_STATE = Object.freeze({
   shell: false,
   webSearch: false,
   wolfram: false,
-  availability: Object.freeze({}),
+  pending: Object.freeze({}),
 });
 
-/** Validate and normalize one availability map, tolerating an absent value. */
-function normalizeAvailability(value) {
+/** Validate and normalize the pending `/chat-tools` command map. */
+function normalizePending(value) {
   if (value === undefined) return {};
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('chat-mode: expected an availability object');
+    throw new Error('chat-mode: expected a pending command object');
   }
-  const availability = {};
-  for (const [key, flag] of Object.entries(value)) {
-    if (!AVAILABILITY_KEY.test(key) || typeof flag !== 'boolean') {
-      throw new Error('chat-mode: expected an availability map of boolean flags');
+  const pending = {};
+  for (const [commandId, args] of Object.entries(value)) {
+    if (commandId === '' || typeof args !== 'string') {
+      throw new Error('chat-mode: expected pending command ids mapped to argument strings');
     }
-    availability[key] = flag;
+    pending[commandId] = args;
   }
-  return availability;
+  return pending;
+}
+
+/** Validate and normalize the three activation flags. */
+function parseFlags(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('chat-mode: expected { shell, webSearch, wolfram }');
+  }
+  const flags = {};
+  for (const key of ['shell', 'webSearch', 'wolfram']) {
+    const flag = value[key];
+    if (flag !== undefined && typeof flag !== 'boolean') {
+      throw new Error(`chat-mode: expected ${key} to be a boolean`);
+    }
+    flags[key] = flag === true;
+  }
+  return flags;
 }
 
 /**
- * Runtime schema for the projection and its wire view. Historical states have
- * only `{ shell, webSearch }`; missing fields normalize to `false` / `{}`, so
- * an old checkpoint replays exactly like a full replay and `stateVersion`
- * stays 1 (optional-addition rule of the session projection contract).
+ * Runtime schema for the projection.
+ *
+ * `stateVersion` is 2 because the fold moved from plugin-defined events to the
+ * known `command/run` / `command/done` pair. A version-1 checkpoint is
+ * discarded by the projection cache instead of being reinterpreted under the
+ * new semantics. Missing fields normalize to `false` / `{}`.
  */
 const stateSchema = {
   parse(value) {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('chat-mode: expected { shell, webSearch, wolfram, availability }');
-    }
-    const flags = {};
-    for (const key of ['shell', 'webSearch', 'wolfram']) {
-      const flag = value[key];
-      if (flag !== undefined && typeof flag !== 'boolean') {
-        throw new Error(`chat-mode: expected ${key} to be a boolean`);
-      }
-      flags[key] = flag === true;
-    }
-    return { ...flags, availability: normalizeAvailability(value.availability) };
+    return { ...parseFlags(value), pending: normalizePending(value?.pending) };
+  },
+};
+
+/** Wire schema: the Client only needs the three activation flags. */
+const wireSchema = {
+  parse(value) {
+    return parseFlags(value);
   },
 };
 
@@ -255,20 +272,15 @@ export async function apply(ctx) {
     return availability;
   };
 
-  // Per-session selected state awaiting the next accepted in-turn pre-step.
-  const pending = new WeakMap();
   // Per-session restriction bookkeeping; strong refs, cleaned up with the preset
   // revision so a chat→other→chat switch cannot leak or duplicate a mask.
   const agents = new Map();
-  // Sessions with an availability append already queued for the next microtask.
-  const availabilityQueue = new Set();
   ctx.effect(() => () => {
     // Clear the registry before disposing so the synchronous `tools/change`
     // emitted by each lift cannot re-enter and re-install a mask while the
     // preset is unloading.
     const entries = [...agents.values()];
     agents.clear();
-    availabilityQueue.clear();
     for (const entry of entries) {
       if (entry.dispose === undefined) continue;
       try {
@@ -281,74 +293,65 @@ export async function apply(ctx) {
 
   const projection = await ctx.sessionProjections.register({
     key: CHAT_MODE_PROJECTION,
-    stateVersion: 1,
+    // v2: the fold moved from plugin-defined events to command/run +
+    // command/done. A v1 checkpoint must be discarded, not reinterpreted.
+    stateVersion: 2,
     stateSchema,
-    init: () => ({ ...DEFAULT_STATE, availability: {} }),
+    init: () => ({ ...DEFAULT_STATE, pending: {} }),
     apply: (state, event) => {
-      if (event.type === CHAT_TOOLS_EVENT) {
-        return {
-          shell: event.data?.shell === true,
-          webSearch: event.data?.webSearch === true,
-          wolfram: event.data?.wolfram === true,
-          availability: state.availability,
-        };
+      // The user-visible choice is encoded by the preset-scoped
+      // /chat-tools command, which is logged as known command events. This
+      // avoids writing an unknown session event type, which cannot carry the
+      // `ignorable` marker through Session.append() and would make the log
+      // refuse to reopen.
+      if (event.type === COMMAND_RUN_EVENT) {
+        if (event.data?.name !== CHAT_TOOLS_COMMAND) return state;
+        const commandId = event.data?.commandId;
+        const args = event.data?.args;
+        if (typeof commandId !== 'string' || commandId === '' || typeof args !== 'string') return state;
+        if (state.pending[commandId] === args) return state;
+        return { ...state, pending: { ...state.pending, [commandId]: args } };
       }
-      if (event.type === CHAT_AVAILABILITY_EVENT) {
-        let next;
-        try {
-          next = normalizeAvailability(event.data?.availability);
-        } catch {
-          return state;
-        }
-        let changed = false;
-        for (const [key, value] of Object.entries(next)) {
-          if (state.availability[key] !== value) {
-            changed = true;
-            break;
-          }
-        }
-        if (!changed) return state;
-        return { ...state, availability: { ...state.availability, ...next } };
+      if (event.type === COMMAND_DONE_EVENT) {
+        const commandId = event.data?.commandId;
+        if (typeof commandId !== 'string' || state.pending[commandId] === undefined) return state;
+        const pending = { ...state.pending };
+        const args = pending[commandId];
+        delete pending[commandId];
+        if (event.data?.kind !== 'success') return { ...state, pending };
+        const parsed = parseToolsCommand(args, state);
+        if (parsed.kind !== 'state') return { ...state, pending };
+        return {
+          shell: parsed.state.shell,
+          webSearch: parsed.state.webSearch,
+          wolfram: parsed.state.wolfram,
+          pending,
+        };
       }
       return state;
     },
     wire: {
-      viewSchema: stateSchema,
+      viewSchema: wireSchema,
       view: state => ({
         shell: state.shell,
         webSearch: state.webSearch,
         wolfram: state.wolfram,
-        availability: state.availability,
       }),
     },
   });
 
-  /** The logged state, normalized to the current shape. */
-  const liveState = (session) => {
+  /** The activation flags folded from the session's command events. */
+  const stateOf = (session) => {
     try {
       const state = projection.stateOf(session);
       return {
         shell: state.shell === true,
         webSearch: state.webSearch === true,
         wolfram: state.wolfram === true,
-        availability: state.availability ?? {},
       };
     } catch {
-      return { ...DEFAULT_STATE, availability: {} };
+      return { shell: false, webSearch: false, wolfram: false };
     }
-  };
-
-  /** The selected state: an in-memory pending choice wins over the logged one. */
-  const stateOf = (session) => {
-    const live = liveState(session);
-    const wanted = pending.get(session);
-    if (wanted === undefined) return live;
-    return {
-      ...live,
-      shell: wanted.shell === true,
-      webSearch: wanted.webSearch === true,
-      wolfram: wanted.wolfram === true,
-    };
   };
 
   /**
@@ -401,61 +404,8 @@ export async function apply(ctx) {
     return texts.join('\n\n');
   });
 
-  const hasOpenTurn = (session) => {
-    try {
-      return ctx.agents.turnBoundaryOf(session).openTurnStartSeq !== null;
-    } catch {
-      return false;
-    }
-  };
-
-  const appendState = (session, state) => {
-    session.append(CHAT_TOOLS_EVENT, {
-      shell: state.shell,
-      webSearch: state.webSearch,
-      wolfram: state.wolfram,
-    });
-    pending.delete(session);
-  };
-
-  /** Append the changed availability flags, deferred out of append publication. */
-  const syncAvailability = (session) => {
-    // The header preset is immutable metadata and does not follow a switch;
-    // the registry entry itself is the authoritative "this session is chat" marker.
-    if (!agents.has(session)) return;
-    const live = liveState(session);
-    const next = availabilityOf();
-    const changed = {};
-    for (const [id, value] of Object.entries(next)) {
-      if (live.availability[id] !== value) changed[id] = value;
-    }
-    if (Object.keys(changed).length === 0) return;
-    try {
-      session.append(CHAT_AVAILABILITY_EVENT, { availability: changed });
-    } catch (error) {
-      warn(`chat-mode: failed to record tool availability: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-
-  /**
-   * Queue one availability check for a Session. `tools/change` and the
-   * projection drive both run inside publication/notification paths where a
-   * synchronous `session.append()` would be refused, so the append is always
-   * deferred to a microtask.
-   */
-  const scheduleAvailabilitySync = (session) => {
-    if (availabilityQueue.has(session)) return;
-    availabilityQueue.add(session);
-    queueMicrotask(() => {
-      availabilityQueue.delete(session);
-      syncAvailability(session);
-    });
-  };
-
   /** Forget a Session that switched away from Chat. */
   const clearSession = (session) => {
-    pending.delete(session);
-    availabilityQueue.delete(session);
     const entry = agents.get(session);
     if (entry === undefined) return;
     // Remove the registry entry before lifting its mask: the lift emits a
@@ -480,36 +430,46 @@ export async function apply(ctx) {
     const session = agent.session;
     let entry = agents.get(session);
     if (entry === undefined) {
-      entry = { agent, known: {}, dispose: undefined, key: '' };
+      entry = { agent, known: {}, dispose: undefined, key: '', busy: false };
       agents.set(session, entry);
     } else {
       entry.agent = agent;
+      // Our own restrict()/lift emits a synchronous `tools/change`; while this
+      // call is publishing a new key, a re-entrant reapply would read the old
+      // projection state and install a stale mask. The only registry change
+      // possible during this synchronous window is ours, so skip it.
+      if (entry.busy === true) return;
     }
-    const deny = [];
-    for (const pack of TOOL_PACKS) {
-      if (state[pack.stateKey] === true) continue;
-      deny.push(...packToolNames(agent, entry, pack));
-    }
-    const key = deny.join(',');
-    if (key === entry.key) return;
-    // Publish the new key before touching the old restriction. Lifting it
-    // emits a synchronous `tools/change`, and a listener that still saw the
-    // old key would install a second, untracked mask.
-    const previous = entry.dispose;
-    entry.dispose = undefined;
-    entry.key = key;
-    if (previous !== undefined) {
-      try {
-        previous();
-      } catch {
-        // The restriction may already be gone with the agent scope.
-      }
-    }
-    if (deny.length === 0) return;
+    entry.busy = true;
     try {
-      entry.dispose = agent.ctx.tools.restrict({ deny });
-    } catch (error) {
-      warn(`chat-mode: failed to restrict ${deny.join(', ')}: ${error instanceof Error ? error.message : String(error)}`);
+      const deny = [];
+      for (const pack of TOOL_PACKS) {
+        if (state[pack.stateKey] === true) continue;
+        deny.push(...packToolNames(agent, entry, pack));
+      }
+      const key = deny.join(',');
+      if (key === entry.key) return;
+      // Publish the new key before touching the old restriction. Lifting it
+      // emits a synchronous `tools/change`, and a listener that still saw the
+      // old key would install a second, untracked mask.
+      const previous = entry.dispose;
+      entry.dispose = undefined;
+      entry.key = key;
+      if (previous !== undefined) {
+        try {
+          previous();
+        } catch {
+          // The restriction may already be gone with the agent scope.
+        }
+      }
+      if (deny.length === 0) return;
+      try {
+        entry.dispose = agent.ctx.tools.restrict({ deny });
+      } catch (error) {
+        warn(`chat-mode: failed to restrict ${deny.join(', ')}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } finally {
+      entry.busy = false;
     }
   };
 
@@ -541,7 +501,6 @@ export async function apply(ctx) {
    */
   const initializeAgent = (agent, source) => {
     applyRestrictions(agent, stateOf(agent.session));
-    scheduleAvailabilitySync(agent.session);
     pinPermission(agent.session, source);
   };
 
@@ -571,7 +530,6 @@ export async function apply(ctx) {
     if (agent === undefined) return;
     try {
       applyRestrictions(agent, stateOf(session));
-      scheduleAvailabilitySync(session);
     } catch (error) {
       warn(`chat-mode: preset switch restriction failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -588,7 +546,7 @@ export async function apply(ctx) {
     if (agent !== undefined) clearSession(agent.session);
   });
 
-  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+  ctx.on('agent/pre-step', async ({ agent }, next) => {
     // Fallback for a composition where the creation event did not reach the
     // preset scope: apply restrictions and the permission lock before the step
     // is prepared. The normal path is `agent/created`.
@@ -603,34 +561,23 @@ export async function apply(ctx) {
       // set before this waterfall, so this only affects later steps.
       try {
         applyRestrictions(agent, stateOf(agent.session));
-        scheduleAvailabilitySync(agent.session);
       } catch (error) {
         warn(`chat-mode: pre-step restriction failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    const decision = await next();
-    if (decision.kind === 'reject' || signal.aborted) return decision;
-    const wanted = pending.get(agent.session);
-    if (wanted === undefined) return decision;
-    try {
-      appendState(agent.session, wanted);
-    } catch (error) {
-      warn(`chat-mode: failed to append chat tools at step start: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return decision;
+    return next();
   });
 
   // A tool registration can land after `agent/created` (or a preset reload can
   // replace the tool set). Re-apply the current per-Agent mask whenever the
   // registry changes; `applyRestrictions` deduplicates by its key, so the
   // `tools/change` emitted by our own restrict() terminates immediately.
-  // Dynamic packs (Wolfram MCP) appear and disappear here; availability is
-  // pushed to the projection so the browser follows without polling.
+  // Dynamic packs (Wolfram MCP) appear and disappear here; the Client half
+  // polls the Host availability route to update the menu item.
   ctx.on('tools/change', () => {
     for (const [session, entry] of agents) {
       try {
         applyRestrictions(entry.agent, stateOf(session));
-        scheduleAvailabilitySync(session);
       } catch (error) {
         warn(`chat-mode: tools/change restriction failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -665,23 +612,10 @@ export async function apply(ctx) {
         if (next.shell === current.shell && next.webSearch === current.webSearch && next.wolfram === current.wolfram) {
           return { kind: 'success', text: `chat tools unchanged: ${describeState(next, availability)}` };
         }
-        pending.set(agent.session, next);
+        // Apply immediately. The durable choice is the command/run +
+        // command/done pair the command runner logs for this invocation; the
+        // projection folds it back on resume and fork.
         applyRestrictions(agent, next);
-        scheduleAvailabilitySync(agent.session);
-        if (hasOpenTurn(agent.session)) {
-          return {
-            kind: 'success',
-            text: `chat tools: ${describeState(next, availability)} (applies from the next step)`,
-          };
-        }
-        try {
-          appendState(agent.session, next);
-        } catch (error) {
-          return {
-            kind: 'error',
-            text: `failed to record chat tools: ${error instanceof Error ? error.message : String(error)}`,
-          };
-        }
         return { kind: 'success', text: `chat tools: ${describeState(next, availability)}` };
       },
     });

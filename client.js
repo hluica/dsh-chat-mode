@@ -10,7 +10,7 @@
  *   offered here.
  * - Tools: a multi-select menu driven by `TOOL_ITEMS`. “持久终端” and
  *   “联网搜索” are always offered; “Wolfram” appears only while the
- *   `chatMode.availability` projection reports registered
+ *   owner-only `/dsh-chat-mode/api/state` route reports registered
  *   `mcp__WolframLanguage__*` tools. Checking an item enables that pack;
  *   checking several enables all of them. The menu stays open while toggling.
  *   The Wolfram icon is copied from `@local/dsh-wolfram-mcp` so the plugin
@@ -37,17 +37,26 @@ window.__ModuleLoader__.load({
     /** Locale dictionary namespace owned by this plugin. */
     const NS = 'chatMode'
 
+    /** Owner-only Host route polled for dynamic tool-pack availability. */
+    const API = '/dsh-chat-mode/api'
+
     /**
      * The tools menu is one data table. `availableKey` marks a dynamic pack:
-     * the item is rendered only while the projection reports that pack as
-     * available. Adding a future pack means one entry here (plus its state
-     * field, Host pack entry, and command branch).
+     * the item is rendered only while the Host availability route reports that
+     * pack as available. Adding a future pack means one entry here (plus its
+     * state field, Host pack entry, and command branch).
      */
     const TOOL_ITEMS = [
       { id: 'shell', stateKey: 'shell', labelKey: 'tools.shell', icon: ShellIcon },
       { id: 'search', stateKey: 'webSearch', labelKey: 'tools.search', icon: WebIcon },
       { id: 'wolfram', stateKey: 'wolfram', labelKey: 'tools.wolfram', icon: WolframMcpIcon, availableKey: 'wolfram' },
     ]
+
+    /** Filter the menu items by the last availability snapshot. */
+    function visibleToolItems(availability) {
+      return TOOL_ITEMS.filter(item =>
+        item.availableKey === undefined || availability?.[item.availableKey] === true)
+    }
 
     /**
      * Wolfram mark copied from `@local/dsh-wolfram-mcp/client.js`
@@ -210,6 +219,7 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
       const [permissionOpen, setPermissionOpen] = useState(false)
       const [toolsOpen, setToolsOpen] = useState(false)
       const [pendingTools, setPendingTools] = useState(null)
+      const [availability, setAvailability] = useState({ wolfram: false })
 
       // Hide the shipped permission control only while a chat session is active.
       useEffect(() => {
@@ -218,22 +228,43 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
         return () => { delete document.body.dataset.dshChatMode }
       }, [isChat])
 
+      // Dynamic availability is environment state owned by the Host tool
+      // registry. The Session projection carries only the user's choice, so the
+      // Client asks the owner-only route and polls it: no session event type is
+      // invented, and an MCP registration/removal is reflected without a page
+      // reload. A failed request keeps the last known snapshot.
+      useEffect(() => {
+        if (!isChat) return undefined
+        let cancelled = false
+        let timer
+        const refresh = async () => {
+          try {
+            const response = await fetch(`${API}/state`, { cache: 'no-store' })
+            const payload = await response.json()
+            if (!cancelled && payload?.ok === true) {
+              setAvailability({ wolfram: payload.result?.wolfram === true })
+            }
+          } catch {
+            // Keep the previous snapshot; the next poll retries.
+          }
+        }
+        void refresh()
+        timer = setInterval(refresh, 3000)
+        return () => {
+          cancelled = true
+          if (timer !== undefined) clearInterval(timer)
+        }
+      }, [isChat, sessionId])
+
       const liveTools = tools === undefined
-        ? { shell: false, webSearch: false, wolfram: false, availability: {} }
+        ? { shell: false, webSearch: false, wolfram: false }
         : {
             shell: tools.shell === true,
             webSearch: tools.webSearch === true,
             wolfram: tools.wolfram === true,
-            availability: tools.availability ?? {},
           }
       const effectiveTools = pendingTools ?? liveTools
-
-      // Availability is environment state, never optimistic: it comes from the
-      // durable projection so clicking an item cannot hide it while the
-      // optimistic pending choice is still in flight.
-      const availability = liveTools.availability
-      const visibleItems = TOOL_ITEMS.filter(item =>
-        item.availableKey === undefined || availability[item.availableKey] === true)
+      const visibleItems = visibleToolItems(availability)
 
       // Keep the optimistic selection until the durable projection catches up.
       useEffect(() => {
@@ -338,6 +369,9 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
 
     return {
       inject: ['slots', 'sessions', 'locale'],
+      // Exported for the smoke test and for future tool packs that need the
+      // same availability filter; the slot runtime ignores extra members.
+      visibleToolItems,
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'chat-mode: locale')
         const style = document.createElement('style')
