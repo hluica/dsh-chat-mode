@@ -20,9 +20,9 @@
 
 Chat 会话的输入框左侧会出现两个紧凑下拉框：
 
-| 控件 | 可选值 | 效果 |
-| --- | --- | --- |
-| 权限 | 仅可查看 / 工作区内修改 | 提交 `/permission read-only` 或 `/permission workspace-write`；不提供完全权限。 |
+| 控件 | 可选值                        | 效果                                                                                                         |
+| ---- | ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 权限 | 仅可查看 / 工作区内修改       | 提交 `/permission read-only` 或 `/permission workspace-write`；不提供完全权限。                              |
 | 工具 | 持久终端 / 联网搜索（可多选） | 勾选任意一项即提交 `/chat-tools shell on` 或 `/chat-tools search on`；再点一次取消。两项都不勾选即全部关闭。 |
 
 工具下拉框是**多选菜单**：菜单保持打开，可以连续勾选两项；每项带图标与 check 标记，触发器显示当前组合（关闭 / 持久终端 / 联网搜索 / 持久终端 + 联网）。未来增加工具时，客户端只需在 `TOOL_ITEMS` 表中增加一个菜单项。
@@ -193,21 +193,21 @@ plugin_manager install_bundle
 
 ## 版本契约
 
-| 项目 | 值 |
-| --- | --- |
-| 插件版本 | `1.1.2` |
-| 包名 | `@local/dsh-chat-mode` |
-| Loader entry id | `dsh-chat-mode` |
-| preset id | `chat` |
-| preset 显示名 | `Chat` |
-| preset order | `5` |
-| 会话投影 key | `chatMode`（`{ shell: boolean, webSearch: boolean }`） |
-| 会话事件 | `chat-mode/tools` |
-| 权限命令 | `/permission read-only\|workspace-write`（preset 作用域 shadow） |
-| 工具命令 | `/chat-tools [mode off\|shell\|search\|both] [shell on\|off] [search on\|off]` |
-| 工具菜单项 | `shell`（持久终端）、`search`（联网搜索），多选 |
-| 客户端 slot | `conversation.input.left` / id `chat-mode-controls` |
-| locale 命名空间 | `chatMode` |
+| 项目            | 值                                                                             |
+| --------------- | ------------------------------------------------------------------------------ |
+| 插件版本        | `1.1.2`                                                                        |
+| 包名            | `@local/dsh-chat-mode`                                                         |
+| Loader entry id | `dsh-chat-mode`                                                                |
+| preset id       | `chat`                                                                         |
+| preset 显示名   | `Chat`                                                                         |
+| preset order    | `5`                                                                            |
+| 会话投影 key    | `chatMode`（`{ shell: boolean, webSearch: boolean }`）                         |
+| 会话事件        | `chat-mode/tools`                                                              |
+| 权限命令        | `/permission read-only\|workspace-write`（preset 作用域 shadow）               |
+| 工具命令        | `/chat-tools [mode off\|shell\|search\|both] [shell on\|off] [search on\|off]` |
+| 工具菜单项      | `shell`（持久终端）、`search`（联网搜索），多选                                |
+| 客户端 slot     | `conversation.input.left` / id `chat-mode-controls`                            |
+| locale 命名空间 | `chatMode`                                                                     |
 
 行为、接口或契约变化时提升 `package.json` 版本；纯文档改动保持版本。迁移记录与历史对比写入 `FEASIBILITY@<harness-version>.md`。
 
@@ -216,4 +216,9 @@ plugin_manager install_bundle
 - 目录/包：`dsh-chat-mode` / `@local/dsh-chat-mode`
 - Loader 行 id：`dsh-chat-mode`；preset 行 id：`preset-chat`
 - preset id：`chat`（小写、稳定，被会话日志记录）
-- 新插件沿用 `dsh-` 前缀与独立 Git 仓库约定；远程操作需用户明确批准。
+
+---
+
+## 许可证
+
+MIT License，详见 [LICENSE](./LICENSE)。
