@@ -448,4 +448,16 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.equal(h.restrictions.length, before + 1, 'no restriction should be replayed after the switch')
 }
 
+// 13. The registry's global selection event is the fallback cleanup path for a
+// switch that the preset revision's own session/event listener does not observe.
+{
+  const h = await boot()
+  h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
+  const before = h.restrictions.length
+  h.handlers.get('agent-preset/selected')('s1', 'standard')
+  assert.equal(h.restrictions.length, before + 1, 'global selection should lift the restriction')
+  h.handlers.get('tools/change')()
+  assert.equal(h.restrictions.length, before + 1, 'global cleanup should stop replays')
+}
+
 console.log('chat-mode preset: all logic checks passed')
