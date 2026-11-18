@@ -2107,10 +2107,11 @@ const TOOL_PACKS = [
 
 - `npm test`：`chat-mode preset: all logic checks passed`、`chat-mode client: all smoke checks passed`。
 - `npm run build`：`verify · all checks passed`，含目录/清单/导出、Host 探针、persona 变量引用、preset inject 列表与测试。
-- 未做运行时验证：`index.js` / `preset.js` / `cordis.patch.yml` 的改动属于 Host/预设组合变化，**必须重启 DSH** 才生效；Client 半刷新页面生效。
-- 待重启后验证：
-  1. 新建 Chat 会话，工具菜单出现 Wolfram、默认不勾选、模型工具列表无 `mcp__WolframLanguage__*`、prompt 无 Wolfram 段；
-  2. 勾选 Wolfram 后下一 step 出现全部 Wolfram 工具与 guidance；
-  3. 取消勾选后工具消失，手动调用得到 deny；
-  4. 禁用/重连 MCP 时菜单项与 guidance 自动跟随，无需刷新；
-  5. shell/web_search/权限行为回归。
+- 重启 DSH 后的运行时验证（Chat 会话 `session-1fcff9ca-0496-496e-b938-e70f83e5e264`，工作区 `.../chat-mode`；该会话创建时 preset 为 `ptc`，随后在空白状态切到 `chat`）：
+  1. **动态可用性检测成功**：seq 7 产生 `chat-mode/availability` `{wolfram:true}`；seq 19 的 `request/header` 包含全部 7 个 `mcp__WolframLanguage__*` 工具。
+  2. **整包启用成功**：seq 9 产生 `chat-mode/tools` `{shell:false, webSearch:false, wolfram:true}`；模型随后调用 `mcp__WolframLanguage__WolframLanguageEvaluator` 3 次（seq 27 / 33 / 39），工具调用与结果均成功。
+  3. **guidance 注入成功**：seq 15 的 `system/message`（`source.kind: system-prompt`）包含完整 Wolfram 段落与 `~/.dsh/skills/wolfram-*/` 路径；与 persona 的 `{{chat_tool_guidance}}` 插值一致。
+  4. **关闭路径成功**：seq 48 产生 `chat-mode/tools` `{wolfram:false}`；seq 56 的 `request/header` 不再包含任何 `mcp__WolframLanguage__*` 工具；seq 54 的 `system/message` 不再包含 Wolfram 段落；关闭后无新的 Wolfram 工具调用。
+  5. **切换 preset 路径成功**：会话 header 仍是创建时的 `ptc`，但切到 `chat` 后 restriction、投影与 guidance 均按 Chat 生效，验证了“不能用不可变 header 判断当前 Chat”的修复。
+- 未在 GUI 中手工复测“再次勾选恢复”（与首次启用同一代码路径）；未对真实 MCP 插件做禁用/重连测试，`tools/change` 触发的工具移除路径由 `scripts/test.mjs` 的模拟移除用例覆盖。
+- shell / web_search / 权限行为未出现回归：本会话由 `ptc` 切到 `chat` 后，`chatMode` 投影与 `/chat-tools` 命令均正常。
