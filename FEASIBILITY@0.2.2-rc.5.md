@@ -221,3 +221,12 @@ Wolfram tools are disabled in chat mode. Ask the user to enable “Wolfram” fr
 - 用 `js-yaml` 额外解析 `cordis.patch.yml`：prefix 正常，`{{chat_tool_guidance}}` 恰好 1 处，bash / pwsh 两处 description 均包含 `Tools menu` 与 `modify files in the workspace`。
 - 静态核对：persona 仍含唯一 `{{chat_tool_guidance}}`；未发现残留的“对话设置”“工具栏”“持久命令”文案。
 - 待用户重启后做运行时确认：(1) 只读时模型引用当前文件策略；(2) 启用持久终端后按需调用；(3) `ask_user_question` 不再对普通追问频繁弹窗，但仍可用于必须拍板的场景。
+
+**运行时验证（2026-11-19，重启后）**
+
+- 用户在 `~/Documents/deepseek-harness/chat-mode` 新建 Chat 会话（`session-01391c16-cc09-4a49-b7fa-d5d786fbe82d`）。会话头初始为 `ptc`，随后 `agent-preset/selected` 切到 `chat`，`sandbox/mode` 同步变为 `read-only`。
+- 首个 `request/header` 的工具列表为：`ask_user_question`、`glob`、`grep`、`read`、`read_image`、`web_fetch`、`working_directory`、`load_workspace_dependencies`、`list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource`；没有 `bash`、`web_search`、`mcp__WolframLanguage__*`。
+- `system/message` 与新的 persona prefix 一致；`{{chat_tool_guidance}}` 被空字符串替换（本会话未启用 Wolfram），未出现旧版“工具栏”“对话设置”“命令执行”文案。
+- 运行时上下文明确给出 `Current DSH file policy: read-only` 与 `Approval prompts are enabled`，验证了“权限状态已注入”的判断。
+- 用户以“据你所知，wolfram 标志性的多面体/星形 logo 的起源是？”提问；模型 0 次工具调用，直接用自然语言回答，并在结尾说明“没有确切的一手资料”，符合“默认直接作答 / 避免汇报腔 / 不确定时如实说明”的新规则。
+- 本会话未启用 Wolfram，因此动态 `chat_tool_guidance` 注入未触发；该路径由 `scripts/test.mjs` 与 `scripts/host-contract.mjs` 的现有断言覆盖。
