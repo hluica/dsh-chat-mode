@@ -1,8 +1,8 @@
 # @local/dsh-chat-mode
 
-最后实质性修改于Harness版本：0.2.2-rc.3
+最后实质性修改于Harness版本：0.2.2-rc.5
 
-在 DSH 中新增一个以纯对话为主的 Agent 预设 **Chat**（preset id：`chat`）：默认只进行文字对话，文件读取需要用户明确要求；持久终端、联网搜索与 Wolfram MCP 工具默认隐藏，由用户在输入框左侧的“对话设置”中显式启用；权限只允许“仅可查看”和“工作区内修改”，不允许选择“完全权限”。
+在 DSH 中新增一个以纯对话为主的 Agent 预设 **Chat**（preset id：`chat`）：默认只进行文字对话，文件读取需要用户明确要求；持久终端、联网搜索与 Wolfram MCP 工具默认隐藏，由用户在输入框左侧的“工具”菜单中显式启用；权限只允许“仅可查看”和“工作区内修改”，不允许选择“完全权限”。
 
 Wolfram 工具是**动态工具包**：只有当 DSH 中存在 `mcp__WolframLanguage__*` 工具时，工具菜单才出现“Wolfram”一项；MCP 注册/移除时，菜单、模型工具列表与 system prompt 会一起自动更新，无需刷新页面或重启会话。
 
@@ -15,10 +15,10 @@ Wolfram 工具是**动态工具包**：只有当 DSH 中存在 `mcp__WolframLang
 - 不主动读写工作区文件，也不主动执行命令。
 - 普通问答、解释、分析、写作、翻译、头脑风暴直接回答，不为了“确认一下”而读取文件或搜索网络。
 - 用户手动附加到对话中的文件，或消息中明确指向的文件，可以直接读取。
-- 不提供 `write`、`edit`、`apply_patch`；需要修改文件时建议切换到支持修改的模式。
+- 不提供 `write`、`edit`、`apply_patch`；需要修改文件时，可启用“持久终端”并把权限切到“工作区内修改”，或切换到支持文件编辑的模式。
 - `web_fetch` 可以直接读取用户给出的链接；`web_search` 默认关闭。
 
-### 输入框左侧的“对话设置”
+### 输入框左侧的权限/工具菜单
 
 Chat 会话的输入框左侧会出现两个紧凑下拉框：
 
@@ -33,16 +33,17 @@ Chat 会话的输入框左侧会出现两个紧凑下拉框：
 
 - 权限：新 Chat 会话在**创建时**即 pin 为 **仅可查看**（早于首轮请求，空白新会话界面也显示正确值）；恢复的 Chat 会话保留已保存的 `read-only` / `workspace-write`，若发现更宽权限则纠正为 `read-only`。
 - 工具：Wolfram 存在时三项都**不勾选**，即 `bash`/`pwsh`、`web_search` 与 `mcp__WolframLanguage__*` 都不出现在模型工具列表中；Wolfram 不存在时菜单只有前两项。
-- `read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question` 始终可用，但由 system prompt 约束为“只在用户明确要求时使用”。
+- `read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question` 始终可用，但由 system prompt 约束为默认不主动使用：仅在用户明确要求，或任务确实依赖该工具的能力时才按需调用。
 
 两个下拉框的外观使用宿主主题 token：带权限/终端/联网/Wolfram 图标、胶囊式触发器、hover / focus-visible / active / disabled 状态，以及展开时旋转的 chevron；亮/暗主题自动适配。工具菜单与权限菜单都复用 shipped `Menu` 的 portal、键盘与焦点行为。
 
-### 权限与一次性授权
+### 权限与写入
 
 - 允许的权限预设只有 `read-only` 与 `workspace-write`，两者的 approval policy 都是 `ask`。
-- 因此模型仍可以在工具调用中通过 `sandbox_permissions` + `justification` 申请一次性的更宽权限；用户批准后只对那一次调用生效。
+- Chat 模式挂载的是持久终端（`@deepseek-ai/dsh-tool-bash-persistent` / `@deepseek-ai/dsh-tool-pwsh-persistent`），其 schema 只有 `command`，没有 `sandbox_permissions` / `justification`；`write` / `edit` / `apply_patch` 也未挂载。因此 Chat **不支持**对单条命令申请一次性更宽权限。
+- 需要写入工作区时，请在“工具”菜单启用“持久终端”，并在“权限”菜单切换到“工作区内修改”；`read-only` 下的写操作会被 sandbox 拒绝。
 - `danger-full-access` 被 preset 作用域的 `/permission` 命令拒绝；`/permission danger-full-access` 会返回错误，不改变会话权限。
-- Chat 会话中，客户端的 shipped 权限控件会被隐藏，改用本插件的两选项下拉框。斜杠命令 `/permission` 仍可用，但其 picker 仍会显示完整进程目录；选择完全权限会被 Host 拒绝。**推荐使用输入框左侧的下拉框**。
+- Chat 会话中，客户端的 shipped 权限控件会被隐藏，改用本插件的两选项下拉框。斜杠命令 `/permission` 仍可用，但其 picker 仍会显示完整进程目录；选择完全权限会被 Host 拒绝。**推荐使用输入框左侧的权限下拉框**。
 
 ## 工作原理
 
@@ -88,7 +89,7 @@ Wolfram 工具**不在 preset 内注册**：它们由 `@local/dsh-wolfram-mcp` �
 - **动态工具包**：`tools/change` 是 unfiltered 的全局注册表通知，MCP 注册/移除工具时都会触发；preset 插件据此重新发现 `mcp__WolframLanguage__*` 并更新 deny 列表。Client 半每 3 秒轮询 owner-only 的 `GET /dsh-chat-mode/api/state`，据此显示/隐藏 Wolfram 项，无需刷新页面。
 - 工具发现使用 **global view**（`ctx.tools.definitions()`），避免“上一轮自己的 deny 把工具隐藏后误判为不存在”；静态包则使用 Agent view 并缓存首次发现结果。
 - 对**已存在 Agent 的 preset 切换**，preset 插件的 `session/event` listener 在 `agent-preset/selected` 切到 chat 时立即 `applyRestrictions`，早于下一轮 `tools.resolve`；全局 `agent-preset/selected` 在切走时清理条目，避免 `tools/change` 把 Chat 的 deny 重放到其他 preset。restriction 与 `/permission` 命令随 preset 卸载清理，chat→other→chat 不会重复注册。
-- `tools/pre-execute` 兜底：如果某个 batch 在 restriction 变化前已解析，调用被关闭的工具会得到明确的 deny 文本（shell / 联网搜索 / Wolfram 分别提示在“对话设置”中启用）。
+- `tools/pre-execute` 兜底：如果某个 batch 在 restriction 变化前已解析，调用被关闭的工具会得到明确的 deny 文本（shell / 联网搜索 / Wolfram 分别提示在“工具”菜单中启用）。
 - 状态由**已知的** `command/run` + `command/done` 事件和 `chatMode` 会话投影持久化：`/chat-tools` 成功执行时，投影根据命令参数折叠出 `{ shell, webSearch, wolfram }`，resume/fork 后恢复；**不写任何插件自定义会话事件**（未知事件类型无法通过 `Session.append()` 带 `ignorable` 标记，会导致会话无法重开）。projection `stateVersion` 为 2。
 - open turn 期间切换工具不会直接 append；选择先进入内存 pending，在下一个 accepted `agent/pre-step` 写入，restriction 立即按 pending 生效。MCP 可用性变化通过 microtask 去重后 append，避免重入 `session.append()`。
 - 注意：agent loop 在 `agent/pre-step` **之前**就 resolve 工具集，因此 pre-step reapply 只影响后续 step；首轮的正确性依靠 Host 提前 pin、`agent/created` prepend 与 `tools/change` 重试。
@@ -97,9 +98,10 @@ Wolfram 工具**不在 preset 内注册**：它们由 `@local/dsh-wolfram-mcp` �
 
 - `cordis.patch.yml` 的 persona prefix 含 `{{chat_tool_guidance}}`；`preset.js` 在 preset scope 注册该变量，`index.js` 在 global scope 注册返回 `''` 的 fallback（preset scope 覆盖 global）。即使 preset 插件加载失败，persona 的严格插值也不会导致 prompt assembly 报错。
 - provider 每次 assembly 都会根据当前会话状态与工具注册表求值：只有 Wolfram 工具**存在且用户已勾选**时，才注入 Wolfram 使用规则：
-  - 具体、明确的计算任务、符号推理、形式化变换 → 应当调用 Wolfram 工具；
-  - 观点性问题、创意写作、纯粹的语言任务，或近似推理即可满足要求 → 不应当调用；
+  - 复杂、易错或需要高可靠性的计算、符号推导、数据处理、可视化、形式化验证 → 应当调用 Wolfram 工具；
+  - 简单常识算术、观点性问题、创意写作、纯粹的语言任务，或定性解释即可满足 → 直接以文字作答，不调用 Wolfram 工具；
   - 技能文档位于 `~/.dsh/skills/wolfram-*/`，需要细节时先读对应 `SKILL.md`。
+- `complete: true` 会抑制工具插件贡献的 prompt section；Chat 的 persona 显式补上了 read / glob / grep 的工具偏好、`web_fetch` / `web_search` 的外部不可信内容与引用要求，以及持久终端的写入/权限流程。
 - 未勾选时不注入，避免模型看到“应当调用”但工具实际被 deny 的提示。
 
 ### 客户端控件
@@ -152,14 +154,14 @@ plugin_manager install_bundle
 
 ## 适用范围与边界
 
-- **不提供文件修改工具**：没有 `write`、`edit`、`apply_patch`。如需修改文件，请切换到 `standard` / `ptc` 等模式。
+- **不提供文件修改工具**：没有 `write`、`edit`、`apply_patch`。如需修改文件，可启用“持久终端”并切到“工作区内修改”，或切换到 `standard` / `ptc` 等模式。
 - **不提供 Office、技能、Goal、Plan、Todo、Subagent、Workflow、日程、后台 jobs** 等工具；这是“纯对话”的刻意裁剪。
 - **shipped `/permission` slash picker 仍显示完全权限**：本插件通过 preset 作用域命令拒绝它，但无法修改 shipped picker 的进程目录。输入框左侧的权限下拉框才是推荐入口。
 - **CSS 隐藏 shipped 权限控件**：依赖 renderer 的 `data-slot` 锚点；如果未来版本重命名该锚点，控件会重新出现，但 Host 端仍然拒绝完全权限。
 - **preset 不是安全沙箱**：DSH 文档明确 presets 可以执行 Host 代码。这里的权限锁是功能/策略层，不是安全边界；真正的文件限制来自 sandbox policy 与 approval。
 - **支持在空白会话中切换到 Chat**：`agent-preset/selected` 事件会在下一轮前应用工具 restriction；`/permission` 与 restriction 随 preset 生命周期释放/重注册。已开始（有 turn）的会话仍受 DSH 的 blank-session 限制，不能切换。
 - **Host 级工具仍存在**：例如 `team_task_*`、`working_directory` 由 Host 组合提供，所有预设都会继承；它们不做文件内容读写。若需要进一步收紧，可在 Agent 作用域用 `restrict()` 追加。
-- **`complete: true` 会抑制工具插件贡献的 prompt guidance**：工具 schema 与 deny 提示仍然存在；本插件通过 `chat_tool_guidance` 变量补充 Chat 自己的规则，未启用 Wolfram 时不注入，避免与工具列表矛盾。
+- **`complete: true` 会抑制工具插件贡献的 prompt guidance**：工具 schema 与 deny 提示仍然存在；本插件在 persona prefix 中补充 Chat 自己的规则，并通过 `chat_tool_guidance` 变量补充 Wolfram 动态规则，未启用 Wolfram 时不注入，避免与工具列表矛盾。
 - **动态工具包依赖“MCP 工具为全局注册”**：当前 `mcpManager` 在 root fiber 挂载 `mcp-client`，因此 `ctx.tools.definitions()` 能看到 `mcp__WolframLanguage__*`。若未来出现 preset 局部注册的 MCP 工具，需要把发现函数改为可注入策略。
 - **Wolfram 技能文档由 `dsh-wolfram-mcp` 安装**：本插件不复制、不删除 `~/.dsh/skills/wolfram-*`，只在 guidance 中提示路径。
 
@@ -172,7 +174,7 @@ plugin_manager install_bundle
 - 检查 `cordis.patch.yml` 的 `id: preset-chat` 与 `config.id: chat`；改完重新安装/重载。
 - 新建会话才使用新预设；已有会话保留其原组合。
 
-**输入框左侧没有“对话设置”**
+**输入框左侧没有权限/工具菜单**
 
 - 确认当前会话的 preset 是 `chat`（会话头的预设标签）。
 - 刷新页面；客户端半是浏览器模块，安装后需要重新加载。
@@ -183,7 +185,7 @@ plugin_manager install_bundle
 
 - 确认当前会话是 Chat，且 `chatMode` 投影已更新（切换后通常下一次 step 生效）。
 - 若在模型运行中切换，选择会在下一个 accepted pre-step 写入；工具 schema 可能要到下一轮才出现。
-- 检查 `agent.ctx.tools.schemas(agent)` 是否包含 `bash`；若包含但模型不调用，检查 system prompt 是否要求用户明确指示。
+- 检查 `agent.ctx.tools.schemas(agent)` 是否包含 `bash`；若包含但模型不调用，检查 system prompt 是否允许在用户要求运行命令或修改文件时按需调用。
 
 **首轮工具列表仍包含持久终端 / 联网搜索 / Wolfram**
 
@@ -194,7 +196,7 @@ plugin_manager install_bundle
 
 - 工具菜单没有 Wolfram：说明当前没有注册的 `mcp__WolframLanguage__*` 工具。打开 Settings → Wolfram MCP 确认 MCP 已连接、工具已加载；MCP 启动较慢时，工具出现后菜单会自动补上（`tools/change` 驱动，无需刷新）。
 - 勾选后仍看不到：确认 Host 的 `GET /dsh-chat-mode/api/state` 返回 `wolfram: true`，且 `tools/pre-execute` 没有 deny；Wolfram 属于动态包，MCP 尚未连接时可能缺失，连接后下一次轮询会自动出现。
-- 若手动调用被 deny，deny 文本会提示在“对话设置”中启用“Wolfram”。
+- 若手动调用被 deny，deny 文本会提示在“工具”菜单中启用“Wolfram”。
 
 **已勾选 Wolfram，但 system prompt 没有 Wolfram 规则**
 
@@ -216,7 +218,9 @@ plugin_manager install_bundle
 **权限下拉框选“工作区内修改”后仍无法写文件**
 
 - Chat 模式没有 `write`/`edit`/`apply_patch`；只能通过勾选“持久终端”后用 shell 在工作区内写。
-- `read-only` 下 shell 写操作会被 sandbox 拒绝，并给出 escalation 提示；切到 `workspace-write` 或批准一次性权限后才可写。
+- `read-only` 下 shell 写操作会被 sandbox 拒绝；切到“工作区内修改”后才可写。
+- 持久终端的 schema 没有 `sandbox_permissions` / `justification`，本模式不支持对单条命令临时提权。
+- 如果切换权限时持久终端已经打开，`terminal-bash` 的 sandbox mode fence 会拒绝 `sandbox/mode` 切换；先关闭“持久终端”再切换权限（这是现有运行时行为，后续可单独优化）。
 - 确认批准策略为 `ask`（`read-only` / `workspace-write` 的 shipped 配置都是 `ask`）。
 
 **`/permission danger-full-access` 仍然出现在 slash picker**
@@ -236,7 +240,7 @@ plugin_manager install_bundle
 
 | 项目            | 值                                                                             |
 | --------------- | ------------------------------------------------------------------------------ |
-| 插件版本        | `1.2.1`                                                                                                          |
+| 插件版本        | `1.3.0`                                                                                                          |
 | 包名            | `@local/dsh-chat-mode`                                                                                           |
 | Loader entry id | `dsh-chat-mode`                                                                                                  |
 | preset id       | `chat`                                                                                                           |

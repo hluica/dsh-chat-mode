@@ -59,8 +59,8 @@ const WOLFRAM_PREFIX = 'mcp__WolframLanguage__';
 const WOLFRAM_GUIDANCE = [
   'Wolfram 工具：',
   '- 当前会话已启用 Wolfram Language 工具（mcp__WolframLanguage__*），它们已经出现在工具列表中，可直接调用，无需再向用户确认是否启用。',
-  '- 当用户需要具体、明确的计算任务（数值计算、数据处理、符号推导、方程求解、单位与实体换算、可视化等）、符号推理或形式化变换时，应当调用 Wolfram 工具，而不要只凭心算或近似推理作答。',
-  '- 当问题属于观点性讨论、创意写作、纯粹的语言任务，或者近似推理即可满足要求时，不应当调用 Wolfram 工具。',
+  '- 当任务涉及心算容易出错或需要高可靠性的计算（复杂数值计算、符号推导、方程求解、数据处理、单位与科学实体换算、数学可视化、形式化验证等）时，应当调用 Wolfram 工具，而不是凭近似估算作答。',
+  '- 当问题属于简单常识算术、观点讨论、创意写作、纯粹的语言任务，或定性解释即可满足需求时，直接以文字作答，不要调用 Wolfram 工具。',
   '- Wolfram 技能文档位于 `~/.dsh/skills/wolfram-*/`（wolfram-language、wolfram-notebooks、wolfram-paclets、wolfram-debugging）；需要更详细的用法时，先阅读对应目录下的 SKILL.md。',
 ].join('\n');
 
@@ -80,19 +80,19 @@ const TOOL_PACKS = [
     id: 'shell',
     stateKey: 'shell',
     names: () => [shellToolName()],
-    denyReason: 'The shell tool is disabled in chat mode. Ask the user to enable “持久终端” in the chat toolbar (对话设置) before running commands.',
+    denyReason: 'The shell tool is disabled in chat mode. Ask the user to enable “持久终端” from the Tools menu (“工具”) in the composer before running commands.',
   },
   {
     id: 'search',
     stateKey: 'webSearch',
     names: () => ['web_search'],
-    denyReason: 'web_search is disabled in chat mode. Ask the user to enable “联网搜索” in the chat toolbar (对话设置) before searching.',
+    denyReason: 'web_search is disabled in chat mode. Ask the user to enable “联网搜索” from the Tools menu (“工具”) in the composer before searching.',
   },
   {
     id: 'wolfram',
     stateKey: 'wolfram',
     prefix: WOLFRAM_PREFIX,
-    denyReason: 'Wolfram tools are disabled in chat mode. Ask the user to enable “Wolfram” in the chat toolbar (对话设置) before using them.',
+    denyReason: 'Wolfram tools are disabled in chat mode. Ask the user to enable “Wolfram” from the Tools menu (“工具”) in the composer before using them.',
     guidance: WOLFRAM_GUIDANCE,
   },
 ];
