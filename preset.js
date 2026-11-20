@@ -3,33 +3,39 @@
  *
  * Mounted only by sessions that select the `chat` Agent preset. It owns:
  *
- * - the `chatMode` session projection (`{ shell, webSearch, wolfram }`), folded
+ * - the `chatMode` session projection (`{ shell, webSearch, custom }`), folded
  *   from the known `command/run` + `command/done` events of the preset-scoped
  *   `/chat-tools` command, so resume and fork keep the user's choice without
  *   writing any plugin-defined event type;
- * - a table of **tool packs** (shell, web search, Wolfram MCP) that share one
- *   discovery / availability / restriction / prompt-guidance path;
+ * - the two **built-in** gates (persistent shell and web search) plus every
+ *   custom pack read from `config.js` (the Wolfram pack and any pack added in
+ *   the Chat Mode tool settings), sharing one discovery / availability /
+ *   restriction / prompt-guidance path;
  * - the initial permission lock: a fresh chat session is pinned to `read-only`,
  *   and a resumed/cleared/compacted session keeps only `read-only` or
  *   `workspace-write`;
  * - an Agent-scoped `/permission` command that shadows the global one and
  *   refuses `danger-full-access`;
- * - the preset-scoped `/chat-tools` command that toggles the tool packs;
+ * - the preset-scoped `/chat-tools` command that toggles the packs;
  * - `tools.restrict()` masks that hide disabled packs from the model, plus a
  *   `tools/pre-execute` guard for batches resolved before a toggle;
  * - the `chat_tool_guidance` prompt variable consumed by the persona prefix.
  *
- * Dynamic packs (Wolfram) are discovered from the global tool registry and
- * followed through the unfiltered `tools/change` notification. Their live
- * availability reaches the browser through the Host half's
- * `/dsh-chat-mode/api/state` route (polled by the Client half); no session event
- * is appended, because `Session.append()` cannot mark an unknown type
- * `ignorable` and such a log would refuse to reopen.
+ * Custom packs are owned by `$DSH_HOME/dsh-chat-mode/tools.json`; the Host
+ * half writes that file and emits `chat-mode/config-changed`, which re-applies
+ * every known Agent's restriction immediately. No session event is appended,
+ * because `Session.append()` cannot mark an unknown type `ignorable` and such a
+ * log would refuse to reopen.
  *
- * The plugin is import-free on purpose: every DSH service it uses is reached
- * through the Cordis context, and the build system can keep the package's
- * dependency tree empty.
+ * The plugin imports only the local `config.js` module, which itself uses Node
+ * builtins; the package keeps its empty dependency tree.
  */
+
+import {
+  WOLFRAM_PACK_ID,
+  getToolsConfig,
+  invalidateConfigCache,
+} from './config.js';
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'chat-mode-preset';
@@ -52,62 +58,35 @@ const CHAT_MODE_PROJECTION = 'chatMode';
 /** Prompt variable referenced by the chat persona prefix. */
 const CHAT_GUIDANCE_VARIABLE = 'chat_tool_guidance';
 
-/** Stable model-facing namespace of the Wolfram MCP server. */
-const WOLFRAM_PREFIX = 'mcp__WolframLanguage__';
-
-/** Guidance injected only while Wolfram tools are available and enabled. */
-const WOLFRAM_GUIDANCE = [
-  'Wolfram 工具：',
-  '- 当前会话已启用 Wolfram Language 工具（mcp__WolframLanguage__*），它们已经出现在工具列表中，可直接调用，无需再向用户确认是否启用。',
-  '- 当任务涉及心算容易出错或需要高可靠性的计算（复杂数值计算、符号推导、方程求解、数据处理、单位与科学实体换算、数学可视化、形式化验证等）时，应当调用 Wolfram 工具，而不是凭近似估算作答。',
-  '- 当问题属于简单常识算术、观点讨论、创意写作、纯粹的语言任务，或定性解释即可满足需求时，直接以文字作答，不要调用 Wolfram 工具。',
-  '- Wolfram 技能文档位于 `~/.dsh/skills/wolfram-*/`（wolfram-language、wolfram-notebooks、wolfram-paclets、wolfram-debugging）；需要更详细的用法时，先阅读对应目录下的 SKILL.md。',
-].join('\n');
-
 /**
- * The tool packs chat mode gates.
- *
- * A pack is one menu item and one or more model-facing tools:
- * - `names` lists statically registered tools (they are found through the
- *   Agent view and cached because a restriction hides them afterwards);
- * - `prefix` discovers a dynamic family from the global registry on every
- *   change, so MCP registration and removal need no extra wiring;
- * - `guidance` is folded into the prompt variable while the pack is available
- *   and enabled.
+ * The two built-in packs. They are fixed in code and never appear in the
+ * configuration file; the settings page cannot control them.
  */
-const TOOL_PACKS = [
+const BUILTIN_PACKS = [
   {
+    kind: 'builtin',
     id: 'shell',
     stateKey: 'shell',
     names: () => [shellToolName()],
     denyReason: 'The shell tool is disabled in chat mode. Ask the user to enable “持久终端” from the Tools menu (“工具”) in the composer before running commands.',
   },
   {
+    kind: 'builtin',
     id: 'search',
     stateKey: 'webSearch',
     names: () => ['web_search'],
     denyReason: 'web_search is disabled in chat mode. Ask the user to enable “联网搜索” from the Tools menu (“工具”) in the composer before searching.',
   },
-  {
-    id: 'wolfram',
-    stateKey: 'wolfram',
-    prefix: WOLFRAM_PREFIX,
-    denyReason: 'Wolfram tools are disabled in chat mode. Ask the user to enable “Wolfram” from the Tools menu (“工具”) in the composer before using them.',
-    guidance: WOLFRAM_GUIDANCE,
-  },
 ];
-
-/** The Wolfram pack, used for command-time availability checks. */
-const WOLFRAM_PACK = TOOL_PACKS.find(pack => pack.id === 'wolfram');
 
 /** The two permission presets a chat session may use. */
 const ALLOWED_PERMISSIONS = new Set(['read-only', 'workspace-write']);
 
-/** Activation flags off and no command awaiting its `command/done`. */
+/** Activation flags off, no custom pack selected, and no command pending. */
 const DEFAULT_STATE = Object.freeze({
   shell: false,
   webSearch: false,
-  wolfram: false,
+  custom: Object.freeze({}),
   pending: Object.freeze({}),
 });
 
@@ -127,40 +106,55 @@ function normalizePending(value) {
   return pending;
 }
 
-/** Validate and normalize the three activation flags. */
-function parseFlags(value) {
+/** Validate and normalize the custom pack selection map. */
+function parseCustom(value) {
+  if (value === undefined) return {};
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('chat-mode: expected { shell, webSearch, wolfram }');
+    throw new Error('chat-mode: expected custom to be an object');
   }
-  const flags = {};
-  for (const key of ['shell', 'webSearch', 'wolfram']) {
-    const flag = value[key];
-    if (flag !== undefined && typeof flag !== 'boolean') {
-      throw new Error(`chat-mode: expected ${key} to be a boolean`);
+  const custom = {};
+  for (const [id, flag] of Object.entries(value)) {
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]*$/u.test(id)) {
+      throw new Error('chat-mode: invalid custom pack id');
     }
-    flags[key] = flag === true;
+    if (typeof flag !== 'boolean') {
+      throw new Error(`chat-mode: expected custom.${id} to be a boolean`);
+    }
+    custom[id] = flag;
   }
-  return flags;
+  return custom;
 }
 
 /**
  * Runtime schema for the projection.
  *
- * `stateVersion` is 2 because the fold moved from plugin-defined events to the
- * known `command/run` / `command/done` pair. A version-1 checkpoint is
- * discarded by the projection cache instead of being reinterpreted under the
- * new semantics. Missing fields normalize to `false` / `{}`.
+ * `stateVersion` is 3 because the old top-level `wolfram` flag moved into the
+ * `custom` map when Wolfram became a configuration pack. A version-2
+ * checkpoint is discarded and the log replays; the parser still accepts the
+ * old shape so a non-standard caller cannot corrupt the state.
  */
-const stateSchema = {
-  parse(value) {
-    return { ...parseFlags(value), pending: normalizePending(value?.pending) };
-  },
-};
+function parseState(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('chat-mode: expected a state object');
+  }
+  const shell = value.shell === undefined ? false : value.shell;
+  const webSearch = value.webSearch === undefined ? false : value.webSearch;
+  if (typeof shell !== 'boolean') throw new Error('chat-mode: expected shell to be a boolean');
+  if (typeof webSearch !== 'boolean') throw new Error('chat-mode: expected webSearch to be a boolean');
+  let custom = parseCustom(value.custom);
+  if (value.wolfram === true) {
+    custom = { ...custom, [WOLFRAM_PACK_ID]: true };
+  }
+  return { shell, webSearch, custom, pending: normalizePending(value.pending) };
+}
 
-/** Wire schema: the Client only needs the three activation flags. */
+const stateSchema = { parse: parseState };
+
+/** Wire schema: the Client only needs the two built-ins and the custom map. */
 const wireSchema = {
   parse(value) {
-    return parseFlags(value);
+    const state = parseState(value);
+    return { shell: state.shell, webSearch: state.webSearch, custom: state.custom };
   },
 };
 
@@ -169,33 +163,51 @@ function shellToolName() {
   return process.platform === 'win32' ? 'pwsh' : 'bash';
 }
 
+/** Build one state object without carrying the pending map. */
+function makeState(shell, webSearch, custom) {
+  return { shell, webSearch, custom };
+}
+
+/** Whether one pack is currently active for a state. Hidden packs are off. */
+function packEnabled(pack, state) {
+  if (pack.kind === 'builtin') return state[pack.stateKey] === true;
+  return pack.hidden !== true && state.custom?.[pack.id] === true;
+}
+
 /** The pack that owns one model-facing tool name, if any. */
-function packForTool(toolName) {
-  for (const pack of TOOL_PACKS) {
-    if (pack.prefix !== undefined) {
-      if (toolName.startsWith(pack.prefix)) return pack;
-    } else if (pack.names !== undefined && pack.names().includes(toolName)) {
-      return pack;
+function packForTool(toolName, packs) {
+  for (const pack of packs) {
+    if (pack.kind === 'builtin') {
+      if (pack.names !== undefined && pack.names().includes(toolName)) return pack;
+    } else {
+      if (pack.prefix !== undefined && toolName.startsWith(pack.prefix)) return pack;
+      if (Array.isArray(pack.tools) && pack.tools.includes(toolName)) return pack;
     }
   }
   return undefined;
 }
 
 /** Whether one tool call is currently gated by the chat-mode state. */
-function isGated(toolName, state) {
-  const pack = packForTool(toolName);
-  return pack !== undefined && state[pack.stateKey] !== true;
+function isGated(toolName, state, packs) {
+  const pack = packForTool(toolName, packs);
+  return pack !== undefined && !packEnabled(pack, state);
 }
 
 /** Model-facing denial text for a disabled gated tool. */
-function gateReason(toolName) {
-  return packForTool(toolName)?.denyReason
-    ?? `The tool "${toolName}" is disabled in chat mode.`;
+function gateReason(toolName, packs) {
+  const pack = packForTool(toolName, packs);
+  if (pack === undefined) return `The tool "${toolName}" is disabled in chat mode.`;
+  if (pack.kind === 'builtin') return pack.denyReason;
+  return `The tools of “${pack.label}” are disabled or hidden in chat mode. Ask the user to enable or show “${pack.label}” in the Chat Tools settings or the Tools menu (“工具”) before using them.`;
 }
 
-/** The three activation flags, independent of availability. */
-function flags(shell, webSearch, wolfram) {
-  return { shell, webSearch, wolfram };
+/** Whether two custom maps select the same packs. */
+function sameCustom(left, right) {
+  const keys = new Set([...Object.keys(left ?? {}), ...Object.keys(right ?? {})]);
+  for (const key of keys) {
+    if ((left?.[key] === true) !== (right?.[key] === true)) return false;
+  }
+  return true;
 }
 
 /** Parse the `/chat-tools` argument grammar into the next state, or an error string. */
@@ -204,34 +216,54 @@ function parseToolsCommand(rawInput, current) {
   if (parts.length === 0) return { kind: 'report' };
   if (parts[0] === 'mode' && parts.length === 2) {
     switch (parts[1]) {
-      case 'off': return { kind: 'state', state: flags(false, false, false) };
-      case 'shell': return { kind: 'state', state: flags(true, false, false) };
-      case 'search': return { kind: 'state', state: flags(false, true, false) };
-      case 'both': return { kind: 'state', state: flags(true, true, false) };
-      case 'wolfram': return { kind: 'state', state: flags(false, false, true) };
-      case 'all': return { kind: 'state', state: flags(true, true, true) };
+      case 'off': return { kind: 'state', state: makeState(false, false, {}) };
+      case 'shell': return { kind: 'state', state: makeState(true, false, {}) };
+      case 'search': return { kind: 'state', state: makeState(false, true, {}) };
+      case 'both': return { kind: 'state', state: makeState(true, true, {}) };
+      case 'wolfram': return { kind: 'state', state: makeState(false, false, { [WOLFRAM_PACK_ID]: true }) };
+      case 'all': return { kind: 'state', state: makeState(true, true, { [WOLFRAM_PACK_ID]: true }) };
       default: return { kind: 'error', text: 'expected one of: off, shell, search, both, wolfram, all' };
     }
   }
-  const stateKey = { shell: 'shell', search: 'webSearch', wolfram: 'wolfram' }[parts[0]];
-  if (stateKey !== undefined && parts.length === 2) {
+  const target = parts[0];
+  if (parts.length === 2) {
     if (parts[1] !== 'on' && parts[1] !== 'off') return { kind: 'error', text: 'expected on or off' };
-    const state = flags(current.shell === true, current.webSearch === true, current.wolfram === true);
-    state[stateKey] = parts[1] === 'on';
-    return { kind: 'state', state };
+    const enabled = parts[1] === 'on';
+    if (target === 'shell' || target === 'search') {
+      const state = makeState(current.shell === true, current.webSearch === true, { ...current.custom });
+      if (target === 'shell') state.shell = enabled;
+      else state.webSearch = enabled;
+      return { kind: 'state', state };
+    }
+    if (/^[a-z0-9][a-z0-9-]*$/u.test(target)) {
+      const custom = { ...current.custom, [target]: enabled };
+      return { kind: 'state', state: makeState(current.shell === true, current.webSearch === true, custom) };
+    }
+    return { kind: 'error', text: 'unknown tool pack id' };
   }
   return {
     kind: 'error',
-    text: 'usage: /chat-tools [mode off|shell|search|both|wolfram|all] [shell on|off] [search on|off] [wolfram on|off]',
+    text: 'usage: /chat-tools [mode off|shell|search|both|wolfram|all] [shell on|off] [search on|off] [<pack-id> on|off]',
   };
 }
 
 /** Human-readable activation summary for command results. */
-function describeState(state, availability) {
-  const wolfram = availability.wolfram === true
-    ? (state.wolfram === true ? 'on' : 'off')
-    : 'unavailable';
-  return `shell=${state.shell === true ? 'on' : 'off'}, web_search=${state.webSearch === true ? 'on' : 'off'}, wolfram=${wolfram}`;
+function describeState(state, packs, availability) {
+  const parts = [
+    `shell=${state.shell === true ? 'on' : 'off'}`,
+    `web_search=${state.webSearch === true ? 'on' : 'off'}`,
+  ];
+  for (const pack of packs) {
+    if (pack.kind !== 'custom') continue;
+    if (pack.hidden === true) {
+      parts.push(`${pack.id}=hidden`);
+      continue;
+    }
+    const available = availability[pack.id] === true;
+    const enabled = state.custom?.[pack.id] === true;
+    parts.push(`${pack.id}=${available ? (enabled ? 'on' : 'off') : 'unavailable'}`);
+  }
+  return parts.join(', ');
 }
 
 /**
@@ -248,27 +280,36 @@ export async function apply(ctx) {
     }
   };
 
-  /** The Wolfram pack's live availability from the global tool registry. */
+  /** The live model-facing tools from the global registry. */
   const globalToolNames = () => {
     try {
-      return ctx.tools.definitions().map(definition => definition.name);
+      return ctx.tools.definitions().map((definition) => definition.name);
     } catch {
       return [];
     }
   };
 
-  /** Whether a dynamic pack currently has at least one registered tool. */
-  const packAvailable = (pack) => {
-    if (pack.prefix === undefined) return true;
-    return globalToolNames().some(name => name.startsWith(pack.prefix));
+  /** The custom packs from the current configuration file. */
+  const customPacks = () => {
+    const { config } = getToolsConfig();
+    return config.tools.map((pack) => ({ ...pack, kind: 'custom' }));
   };
 
-  /** The availability snapshot for every dynamic pack. */
-  const availabilityOf = () => {
+  /** The built-in packs plus the current custom packs. */
+  const allPacks = () => [...BUILTIN_PACKS, ...customPacks()];
+
+  /** Whether one custom pack currently has at least one registered tool. */
+  const packAvailable = (pack) => {
+    if (pack.kind === 'builtin') return true;
+    const names = globalToolNames();
+    if (typeof pack.prefix === 'string' && names.some((name) => name.startsWith(pack.prefix))) return true;
+    return (pack.tools ?? []).some((name) => names.includes(name));
+  };
+
+  /** The availability snapshot for every pack. */
+  const availabilityOf = (packs) => {
     const availability = {};
-    for (const pack of TOOL_PACKS) {
-      if (pack.prefix !== undefined) availability[pack.id] = packAvailable(pack);
-    }
+    for (const pack of packs) availability[pack.id] = packAvailable(pack);
     return availability;
   };
 
@@ -293,9 +334,8 @@ export async function apply(ctx) {
 
   const projection = await ctx.sessionProjections.register({
     key: CHAT_MODE_PROJECTION,
-    // v2: the fold moved from plugin-defined events to command/run +
-    // command/done. A v1 checkpoint must be discarded, not reinterpreted.
-    stateVersion: 2,
+    // v3: Wolfram moved from a dedicated flag into the config-pack map.
+    stateVersion: 3,
     stateSchema,
     init: () => ({ ...DEFAULT_STATE, pending: {} }),
     apply: (state, event) => {
@@ -324,7 +364,7 @@ export async function apply(ctx) {
         return {
           shell: parsed.state.shell,
           webSearch: parsed.state.webSearch,
-          wolfram: parsed.state.wolfram,
+          custom: parsed.state.custom,
           pending,
         };
       }
@@ -332,10 +372,10 @@ export async function apply(ctx) {
     },
     wire: {
       viewSchema: wireSchema,
-      view: state => ({
+      view: (state) => ({
         shell: state.shell,
         webSearch: state.webSearch,
-        wolfram: state.wolfram,
+        custom: state.custom,
       }),
     },
   });
@@ -347,24 +387,33 @@ export async function apply(ctx) {
       return {
         shell: state.shell === true,
         webSearch: state.webSearch === true,
-        wolfram: state.wolfram === true,
+        custom: state.custom !== null && typeof state.custom === 'object' ? { ...state.custom } : {},
       };
     } catch {
-      return { shell: false, webSearch: false, wolfram: false };
+      return { shell: false, webSearch: false, custom: {} };
     }
   };
 
   /**
    * Discover one pack's model-facing tool names for an Agent.
    *
-   * Dynamic (`prefix`) packs read the **global** registry: the Agent view
-   * applies our own restriction, so using it here would make a disabled pack
-   * look absent and lift its mask. Static (`names`) packs read the Agent view
-   * and cache the successful first discovery for the same reason.
+   * Built-in (`names`) packs read the Agent view and cache the successful first
+   * discovery, because our own restriction would otherwise make a disabled
+   * pack look absent. Custom packs read the **global** registry: a disabled
+   * pack must still be denied, and a hidden pack must stay denied even when a
+   * session had previously enabled it.
    */
   const packToolNames = (agent, entry, pack) => {
-    if (pack.prefix !== undefined) {
-      return globalToolNames().filter(name => name.startsWith(pack.prefix));
+    if (pack.kind === 'custom') {
+      const names = globalToolNames();
+      const matched = new Set();
+      if (pack.prefix !== undefined) {
+        for (const name of names) if (name.startsWith(pack.prefix)) matched.add(name);
+      }
+      if (Array.isArray(pack.tools)) {
+        for (const name of pack.tools) if (names.includes(name)) matched.add(name);
+      }
+      return [...matched];
     }
     const cached = entry?.known?.[pack.id];
     if (cached !== undefined && cached.length > 0) return cached;
@@ -392,13 +441,11 @@ export async function apply(ctx) {
       return '';
     }
     const texts = [];
-    for (const pack of TOOL_PACKS) {
-      if (pack.guidance === undefined) continue;
-      if (state[pack.stateKey] !== true) continue;
-      const available = pack.prefix === undefined
-        ? packToolNames(agent, undefined, pack).length > 0
-        : packAvailable(pack);
-      if (!available) continue;
+    for (const pack of allPacks()) {
+      if (pack.kind !== 'custom') continue;
+      if (typeof pack.guidance !== 'string' || pack.guidance === '') continue;
+      if (!packEnabled(pack, state)) continue;
+      if (!packAvailable(pack)) continue;
       texts.push(pack.guidance);
     }
     return texts.join('\n\n');
@@ -443,9 +490,14 @@ export async function apply(ctx) {
     entry.busy = true;
     try {
       const deny = [];
-      for (const pack of TOOL_PACKS) {
-        if (state[pack.stateKey] === true) continue;
-        deny.push(...packToolNames(agent, entry, pack));
+      const seen = new Set();
+      for (const pack of allPacks()) {
+        if (packEnabled(pack, state)) continue;
+        for (const name of packToolNames(agent, entry, pack)) {
+          if (seen.has(name)) continue;
+          seen.add(name);
+          deny.push(name);
+        }
       }
       const key = deny.join(',');
       if (key === entry.key) return;
@@ -572,8 +624,8 @@ export async function apply(ctx) {
   // replace the tool set). Re-apply the current per-Agent mask whenever the
   // registry changes; `applyRestrictions` deduplicates by its key, so the
   // `tools/change` emitted by our own restrict() terminates immediately.
-  // Dynamic packs (Wolfram MCP) appear and disappear here; the Client half
-  // polls the Host availability route to update the menu item.
+  // Dynamic packs (Wolfram MCP and custom packs) appear and disappear here; the
+  // Client half polls the Host state route to update the menu.
   ctx.on('tools/change', () => {
     for (const [session, entry] of agents) {
       try {
@@ -584,39 +636,75 @@ export async function apply(ctx) {
     }
   });
 
+  // The Host settings page writes the configuration file and emits this
+  // process-local event. Re-read the file and apply the new deny list to every
+  // known Agent immediately; the prompt provider reads the same cache on the
+  // next assembly.
+  ctx.on('chat-mode/config-changed', () => {
+    invalidateConfigCache();
+    for (const [session, entry] of agents) {
+      try {
+        applyRestrictions(entry.agent, stateOf(session));
+      } catch (error) {
+        warn(`chat-mode: config change restriction failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  });
+
   // Defense in depth: a batch resolved before a restriction change can still
   // carry a now-disabled tool. The guard turns that call into a clear denial.
   ctx.on('tools/pre-execute', async (exec, next) => {
     if (exec.agent === undefined) return next();
-    if (!isGated(exec.name, stateOf(exec.agent.session))) return next();
-    return { kind: 'deny', reason: gateReason(exec.name) };
+    const packs = allPacks();
+    if (!isGated(exec.name, stateOf(exec.agent.session), packs)) return next();
+    return { kind: 'deny', reason: gateReason(exec.name, packs) };
   });
 
   ctx.inject(['commands'], (commandCtx) => {
     commandCtx.commands.register({
       name: 'chat-tools',
       description: 'Enable or disable advanced tools in chat mode',
-      input: { hint: '[mode off|shell|search|both|wolfram|all] [shell on|off] [search on|off] [wolfram on|off]' },
+      input: { hint: '[mode off|shell|search|both|wolfram|all] [shell on|off] [search on|off] [<pack-id> on|off]' },
       handler: ({ agent, rawInput }) => {
         const current = stateOf(agent.session);
-        const availability = availabilityOf();
+        const packs = allPacks();
+        const availability = availabilityOf(packs);
         const parsed = parseToolsCommand(rawInput, current);
         if (parsed.kind === 'error') return { kind: 'error', text: parsed.text };
         if (parsed.kind === 'report') {
-          return { kind: 'success', text: `chat tools: ${describeState(current, availability)}` };
+          return { kind: 'success', text: `chat tools: ${describeState(current, packs, availability)}` };
         }
         const next = parsed.state;
-        if (next.wolfram === true && availability[WOLFRAM_PACK.id] !== true) {
-          return { kind: 'error', text: 'Wolfram tools are not available in this session.' };
+        const parts = rawInput.trim().split(/\s+/).filter(Boolean);
+        const mode = parts[0] === 'mode' ? parts[1] : undefined;
+        const targetId = mode === 'all' || mode === 'wolfram'
+          ? WOLFRAM_PACK_ID
+          : mode === undefined && parts[0] !== 'shell' && parts[0] !== 'search'
+            ? parts[0]
+            : undefined;
+        if (targetId !== undefined) {
+          const target = packs.find((pack) => pack.kind === 'custom' && pack.id === targetId);
+          if (target === undefined) {
+            return { kind: 'error', text: `Unknown tool pack "${targetId}".` };
+          }
+          if (target.hidden === true) {
+            return { kind: 'error', text: `The tool pack "${target.label}" is hidden. Show it in Settings → Chat Mode工具配置 first.` };
+          }
+          const enabling = mode === 'all' || mode === 'wolfram' || parts[1] === 'on';
+          if (enabling && availability[targetId] !== true) {
+            return { kind: 'error', text: `The tools of "${target.label}" are not available in this session.` };
+          }
         }
-        if (next.shell === current.shell && next.webSearch === current.webSearch && next.wolfram === current.wolfram) {
-          return { kind: 'success', text: `chat tools unchanged: ${describeState(next, availability)}` };
+        if (next.shell === current.shell
+          && next.webSearch === current.webSearch
+          && sameCustom(next.custom, current.custom)) {
+          return { kind: 'success', text: `chat tools unchanged: ${describeState(next, packs, availability)}` };
         }
         // Apply immediately. The durable choice is the command/run +
         // command/done pair the command runner logs for this invocation; the
         // projection folds it back on resume and fork.
         applyRestrictions(agent, next);
-        return { kind: 'success', text: `chat tools: ${describeState(next, availability)}` };
+        return { kind: 'success', text: `chat tools: ${describeState(next, packs, availability)}` };
       },
     });
 

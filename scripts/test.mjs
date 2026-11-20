@@ -2,20 +2,49 @@
  * Logic-level tests for the preset-scope chat-mode plugin.
  *
  * These exercise the plugin's own decisions — permission pinning, tool
- * restrictions, dynamic tool-pack availability, command grammar, prompt
- * guidance, and the command-derived projection — against stubbed Cordis
- * services. They do not replace a live Web-session check; they catch the
- * regressions that are cheap to catch outside the Host.
+ * restrictions, dynamic built-in/config packs, hidden-pack suspension, command
+ * grammar, prompt guidance, and the command-derived projection — against
+ * stubbed Cordis services. They do not replace a live Web-session check; they
+ * catch the regressions that are cheap to catch outside the Host.
  *
+ * The test process points `DSH_HOME` at a temporary directory before importing
+ * the preset half, so it never reads or writes the user's real configuration.
  * The harness mirrors the real command path: `command/run` is appended before
  * the handler, `command/done` after it, and the projection folds both.
  */
 import { strict as assert } from 'node:assert'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const testHome = mkdtempSync(join(tmpdir(), 'dsh-chat-mode-test-'))
+process.env.DSH_HOME = testHome
+
+const configModule = await import(pathToFileURL(join(root, 'config.js')).href)
 const preset = await import(pathToFileURL(join(root, 'preset.js')).href)
+
+/** Replace the whole configuration document and drop the read cache. */
+function setConfig(document) {
+  const written = configModule.writeToolsConfig(document)
+  assert.equal(written.ok, true, written.error)
+  configModule.invalidateConfigCache()
+}
+
+/** Restore the shipped default configuration. */
+function resetConfig() {
+  setConfig(configModule.defaultConfig())
+}
+
+resetConfig()
+process.on('exit', () => {
+  try {
+    rmSync(testHome, { recursive: true, force: true })
+  } catch {
+    // Best-effort cleanup.
+  }
+})
 
 /** Build one isolated harness with a fresh set of stubs. */
 function harness(options = {}) {
@@ -32,7 +61,7 @@ function harness(options = {}) {
   const handlers = new Map()
   const handlerOptions = new Map()
   let current = initialCurrent
-  let projected = { shell: false, webSearch: false, wolfram: false, pending: {} }
+  let projected = { shell: false, webSearch: false, custom: {}, pending: {} }
   let projectionDefinition
   let commandCounter = 0
 
@@ -193,8 +222,9 @@ function command(list, name) {
 
 const WOLFRAM_EVALUATOR = 'mcp__WolframLanguage__WolframLanguageEvaluator'
 const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
+const WORKDIR = 'working_directory'
 
-// 1. Fresh Agent: read-only permission and both static advanced tools hidden.
+// 1. Fresh Agent: read-only permission and both built-in advanced tools hidden.
 // Without Wolfram tools there is no Wolfram deny entry, and the projection is
 // the empty command-derived state.
 {
@@ -205,7 +235,7 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
   assert.ok(command(h.commands, 'chat-tools'), '/chat-tools should be registered in the preset scope')
   assert.ok(command(h.commands, 'permission'), '/permission should be registered in the preset scope')
-  assert.deepEqual(h.projection, { shell: false, webSearch: false, wolfram: false, pending: {} })
+  assert.deepEqual(h.projection, { shell: false, webSearch: false, custom: {}, pending: {} })
   assert.equal(h.variables.get('chat_tool_guidance')({ agent: h.agent }), '', 'no guidance when Wolfram is off')
   assert.deepEqual(h.events, [], 'the plugin must not append plugin-defined session events')
 }
@@ -237,7 +267,7 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
     source: { kind: 'user' },
   })
   assert.equal(h.events[1].data.kind, 'success')
-  assert.deepEqual(h.projection, { shell: true, webSearch: false, wolfram: false, pending: {} })
+  assert.deepEqual(h.projection, { shell: true, webSearch: false, custom: {}, pending: {} })
   assert.deepEqual(h.restrictions.at(-2), { kind: 'lift', filter: { deny: ['bash', 'web_search'] } })
   assert.deepEqual(h.restrictions.at(-1), { kind: 'restrict', filter: { deny: ['web_search'] } })
 }
@@ -247,8 +277,8 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
 {
   const h = await boot()
   const definition = h.projectionDefinition
-  assert.equal(definition.stateVersion, 2, 'command-derived fold is stateVersion 2')
-  const initial = { shell: false, webSearch: false, wolfram: false, pending: {} }
+  assert.equal(definition.stateVersion, 3, 'config-pack state is stateVersion 3')
+  const initial = { shell: false, webSearch: false, custom: {}, pending: {} }
   const running = definition.apply(initial, {
     type: 'command/run',
     data: { commandId: 'cmd-9', name: 'chat-tools', args: ' mode both', source: { kind: 'user' } },
@@ -258,8 +288,8 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
     type: 'command/done',
     data: { commandId: 'cmd-9', kind: 'success', text: 'ok' },
   })
-  assert.deepEqual(done, { shell: true, webSearch: true, wolfram: false, pending: {} })
-  assert.deepEqual(definition.wire.view(done), { shell: true, webSearch: true, wolfram: false })
+  assert.deepEqual(done, { shell: true, webSearch: true, custom: {}, pending: {} })
+  assert.deepEqual(definition.wire.view(done), { shell: true, webSearch: true, custom: {} })
 
   // A failed command removes its pending entry without changing the flags.
   const failedRun = definition.apply(initial, {
@@ -286,16 +316,24 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.equal(definition.apply(initial, { type: 'chat-mode/tools', data: { shell: true } }), initial)
   assert.equal(definition.apply(initial, { type: 'chat-mode/availability', data: { availability: {} } }), initial)
 
-  // Historical state (pre-v2) normalizes without the removed availability map.
+  // Historical state (pre-v3) normalizes without the removed availability map
+  // and migrates the old top-level wolfram flag into the custom map.
   assert.deepEqual(definition.stateSchema.parse({ shell: true, webSearch: false }), {
     shell: true,
     webSearch: false,
-    wolfram: false,
+    custom: {},
+    pending: {},
+  })
+  assert.deepEqual(definition.stateSchema.parse({ shell: true, webSearch: false, wolfram: true }), {
+    shell: true,
+    webSearch: false,
+    custom: { wolfram: true },
     pending: {},
   })
   assert.throws(() => definition.stateSchema.parse(null))
   assert.throws(() => definition.stateSchema.parse({ shell: 'yes', webSearch: false }))
   assert.throws(() => definition.stateSchema.parse({ shell: false, webSearch: false, pending: { cmd: 1 } }))
+  assert.throws(() => definition.stateSchema.parse({ shell: false, webSearch: false, custom: { 'Bad Id': true } }))
 }
 
 // 5. `/permission` refuses full access and accepts the two allowed presets.
@@ -351,8 +389,8 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
 }
 
-// 9. Wolfram tools appear: the pack is discovered, denied by default, enabled
-// through the command path, and the guidance follows the projected flags.
+// 9. Wolfram tools appear: the default pack is discovered, denied by default,
+// enabled through the command path, and the guidance follows the projected flags.
 {
   const h = await boot()
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
@@ -372,7 +410,12 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
 
   const enabled = h.runCommand('chat-tools', ' wolfram on')
   assert.equal(enabled.kind, 'success')
-  assert.deepEqual(h.projection, { shell: false, webSearch: false, wolfram: true, pending: {} })
+  assert.deepEqual(h.projection, {
+    shell: false,
+    webSearch: false,
+    custom: { wolfram: true },
+    pending: {},
+  })
   assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
   const allowed = await guard({ agent: h.agent, name: WOLFRAM_EVALUATOR }, async () => ({ kind: 'allow' }))
   assert.equal(allowed.kind, 'allow')
@@ -400,7 +443,7 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
   const rejected = h.runCommand('chat-tools', ' wolfram on')
   assert.equal(rejected.kind, 'error')
   assert.match(rejected.text, /not available/u)
-  assert.deepEqual(h.projection, { shell: false, webSearch: false, wolfram: false, pending: {} })
+  assert.deepEqual(h.projection, { shell: false, webSearch: false, custom: {}, pending: {} })
 }
 
 // 11. Switching away from Chat disposes the restriction and stops replays.
@@ -442,7 +485,114 @@ const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
     { type: 'command/done', data: { commandId: 'cmd-2', kind: 'success', text: 'ok' } },
   ]
   for (const event of sequence) state = definition.apply(state, event)
-  assert.deepEqual(state, { shell: true, webSearch: true, wolfram: false, pending: {} })
+  assert.deepEqual(state, { shell: true, webSearch: true, custom: {}, pending: {} })
+}
+
+// 14. A user-created config pack joins the deny list, can be enabled, and its
+// guidance follows the same rule. Hiding suspends tools and guidance without
+// losing the saved per-session choice; showing it restores both.
+{
+  const defaultDoc = configModule.defaultConfig()
+  setConfig({
+    version: 1,
+    tools: [
+      ...defaultDoc.tools,
+      {
+        id: 'pack-workdir',
+        label: '工作目录',
+        icon: 'default',
+        tools: [WORKDIR],
+        guidance: '工作目录工具：\n- 仅在用户要求查看目录时使用。',
+      },
+    ],
+  })
+
+  const h = await boot({ tools: ['bash', 'web_search', WORKDIR] })
+  h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
+  assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search', WORKDIR] })
+
+  const guard = h.handlers.get('tools/pre-execute')
+  const denied = await guard({ agent: h.agent, name: WORKDIR }, async () => ({ kind: 'allow' }))
+  assert.equal(denied.kind, 'deny')
+  assert.match(denied.reason, /工作目录/u)
+
+  const enabled = h.runCommand('chat-tools', ' pack-workdir on')
+  assert.equal(enabled.kind, 'success')
+  assert.deepEqual(h.projection.custom, { 'pack-workdir': true })
+  assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
+  assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /工作目录工具/u)
+
+  const hidden = configModule.updateToolPack(
+    configModule.getToolsConfig().config,
+    'pack-workdir',
+    { hidden: true },
+  )
+  assert.equal(hidden.ok, true)
+  setConfig(hidden.config)
+  h.handlers.get('chat-mode/config-changed')()
+  assert.deepEqual(h.projection.custom, { 'pack-workdir': true }, 'hiding must not rewrite the session choice')
+  assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search', WORKDIR] })
+  assert.equal(h.variables.get('chat_tool_guidance')({ agent: h.agent }), '')
+  const rejected = h.runCommand('chat-tools', ' pack-workdir on')
+  assert.equal(rejected.kind, 'error')
+  assert.match(rejected.text, /hidden/u)
+
+  const shown = configModule.updateToolPack(
+    configModule.getToolsConfig().config,
+    'pack-workdir',
+    { hidden: false },
+  )
+  assert.equal(shown.ok, true)
+  setConfig(shown.config)
+  h.handlers.get('chat-mode/config-changed')()
+  assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
+  assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /工作目录工具/u)
+
+  resetConfig()
+}
+
+// 15. Editing a pack's guidance through the same update path changes the next
+// prompt assembly immediately.
+{
+  resetConfig()
+  const h = await boot({ tools: ['bash', 'web_search', WOLFRAM_EVALUATOR] })
+  h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
+  h.runCommand('chat-tools', ' wolfram on')
+  assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /Wolfram 工具/u)
+
+  const updated = configModule.updateToolPack(
+    configModule.getToolsConfig().config,
+    'wolfram',
+    { guidance: '自定义 Wolfram 指引：仅在复杂计算时调用。' },
+  )
+  assert.equal(updated.ok, true)
+  setConfig(updated.config)
+  h.handlers.get('chat-mode/config-changed')()
+  assert.equal(
+    h.variables.get('chat_tool_guidance')({ agent: h.agent }),
+    '自定义 Wolfram 指引：仅在复杂计算时调用。',
+  )
+  resetConfig()
+}
+
+// 16. An invalid configuration file falls back to the default Wolfram pack and
+// reports an error instead of throwing into Agent creation or command handling.
+{
+  const path = configModule.resolveConfigPath()
+  writeFileSync(path, '{not json', 'utf8')
+  configModule.invalidateConfigCache()
+  const snapshot = configModule.getToolsConfig()
+  assert.equal(snapshot.exists, true)
+  assert.match(snapshot.error, /JSON/u)
+  assert.equal(snapshot.config.tools[0].id, 'wolfram')
+
+  const h = await boot()
+  h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
+  assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search'] })
+  const report = h.runCommand('chat-tools', '')
+  assert.equal(report.kind, 'success')
+  assert.match(report.text, /wolfram=unavailable/u)
+  resetConfig()
 }
 
 console.log('chat-mode preset: all logic checks passed')

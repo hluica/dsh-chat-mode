@@ -2,10 +2,10 @@
  * Smoke test for the browser half.
  *
  * Loads `client.js` under a tiny module-loader / React / primitives stub and
- * asserts the slot registration, the chat-only branch, the permission
- * single-select, and the tools multi-select. It does not emulate DSH's real
- * popup shell; the shipped `PermissionSelect` uses the same `Menu` contract,
- * and the live GUI check is still part of acceptance.
+ * asserts the slot registrations, the chat-only branch, the permission
+ * single-select, the built-in tools multi-select, the dynamic-item helpers, and
+ * the settings page registration. It does not emulate DSH's real popup shell;
+ * the live GUI check is still part of acceptance.
  */
 import { strict as assert } from 'node:assert'
 import { dirname, join } from 'node:path'
@@ -60,7 +60,7 @@ assert.deepEqual(module.inject, ['slots', 'sessions', 'locale'])
 
 const dictionary = {}
 const styles = []
-const slot = {}
+const registrations = {}
 const ctx = {
   effect: callback => { callback(); return () => {} },
   locale: {
@@ -68,12 +68,18 @@ const ctx = {
       dictionary[namespace] = dictionaries
       return () => {}
     },
+    bind(namespace) {
+      return (key, args) => (args === undefined
+        ? `${namespace}.${key}`
+        : `${namespace}.${key}(${JSON.stringify(args)})`)
+    },
+    subscribe() { return () => {} },
+    getSnapshot() { return { revision: 0 } },
   },
   slots: {
     inject(_name, callback) { callback(); return () => {} },
     register(options, component) {
-      slot.options = options
-      slot.component = component
+      registrations[options.name] = { options, component }
       return () => {}
     },
   },
@@ -92,24 +98,61 @@ globalThis.document = {
 
 module.apply(ctx)
 
-assert.equal(slot.options.name, 'conversation.input.left')
-assert.equal(slot.options.id, 'chat-mode-controls')
-assert.equal(slot.options.locale, 'chatMode')
-assert.equal(typeof slot.component, 'function')
+// Composer control registration.
+const composer = registrations['conversation.input.left']
+assert.ok(composer, 'composer slot registered')
+assert.equal(composer.options.id, 'chat-mode-controls')
+assert.equal(composer.options.locale, 'chatMode')
+assert.equal(typeof composer.component, 'function')
+
+// Settings page sits between the two existing pages.
+const section = registrations['settings.section']
+assert.ok(section, 'settings section registered')
+assert.equal(section.options.id, 'chat-mode-tools')
+assert.equal(section.options.order, 21.5)
+assert.equal(section.options.locale, 'chatMode')
+assert.equal(typeof section.component, 'function')
+const sectionIcon = registrations['settings.section.icon']
+assert.ok(sectionIcon, 'settings navigation icon registered')
+assert.equal(sectionIcon.options.id, 'chat-mode-tools')
+assert.equal(typeof sectionIcon.component, 'function')
+
 assert.ok(dictionary.chatMode?.zh?.['permission.trigger'], 'zh dictionary registered')
 assert.ok(dictionary.chatMode?.en?.['permission.trigger'], 'en dictionary registered')
+assert.equal(dictionary.chatMode.zh['settings.nav'], 'Chat Mode工具配置')
+assert.equal(dictionary.chatMode.zh['settings.hide'], '隐藏')
+assert.equal(dictionary.chatMode.zh['settings.submit'], '提交')
+assert.equal(dictionary.chatMode.zh['settings.discard'], '放弃更改')
 assert.equal(styles.length, 1, 'style element injected')
 
 const t = (key, args) => args === undefined ? key : `${key}(${JSON.stringify(args)})`
+
+// The settings page's initial render (the hook stub keeps the initial state:
+// loading, no configuration, candidates not loaded). This catches malformed
+// element trees without emulating the Host API.
+const settingsInitial = section.component({
+  t,
+  localeFace: { subscribe: () => () => {}, getSnapshot: () => ({ revision: 0 }) },
+  api: {
+    loadConfig: async () => ({ config: { version: 1, tools: [] }, custom: [], path: '', error: null }),
+    loadCandidates: async () => ({ tools: [] }),
+    addTool: async () => ({}),
+    updateTool: async () => ({}),
+  },
+})
+assert.equal(settingsInitial.type, 'section')
+assert.equal(settingsInitial.props.className, 'dsh-chat-settings')
+const settingsTitle = settingsInitial.children.find(child => child?.props?.className === 'dsh-chat-settings-title')
+assert.equal(settingsTitle.children[0], 'settings.title')
 const commands = []
 
 /** Render one session with the supplied preset and projections. */
 function render({
   preset = 'chat',
   permission = 'read-only',
-  tools = { shell: false, webSearch: false, wolfram: false },
+  tools = { shell: false, webSearch: false, custom: {} },
 } = {}) {
-  return slot.component({
+  return composer.component({
     sessionId: 's1',
     useSessions: selector => selector({
       byId: { s1: { projectionValues: { agentPreset: preset } } },
@@ -152,8 +195,7 @@ assert.equal(permissionMenu.props.anchor.props.className, 'dsh-chat-trigger')
 assert.ok(triggerIcon(permissionMenu.props.anchor) !== undefined, 'permission trigger carries an icon')
 assert.match(triggerLabel(permissionMenu.props.anchor).children[0], /permission\.trigger/u)
 
-// Tools: multi-select; Wolfram is hidden until the Host availability route
-// reports it, so the default menu has exactly the two static items.
+// Tools: multi-select; the default menu has exactly the two built-in items.
 assert.deepEqual(toolsMenu.props.items.map(item => item.id), ['shell', 'search'])
 assert.deepEqual(toolsMenu.props.selectedIds, [])
 assert.equal(toolsMenu.props.selectedId, undefined)
@@ -165,24 +207,54 @@ assert.match(triggerLabel(toolsMenu.props.anchor).children[0], /tools\.trigger/u
 // selected item labels instead of maintaining fixed combination strings.
 assert.equal(dictionary.chatMode.zh['tools.shell'], '持久终端')
 assert.equal(dictionary.chatMode.zh['tools.search'], '联网搜索')
-assert.equal(dictionary.chatMode.zh['tools.wolfram'], 'Wolfram')
 assert.equal(dictionary.chatMode.zh['tools.off'], '全部关闭')
 
 // Selected ids derive from the effective state.
-const shellTools = render({ tools: { shell: true, webSearch: false, wolfram: false } })
+const shellTools = render({ tools: { shell: true, webSearch: false, custom: {} } })
 assert.deepEqual(shellTools.children[1].props.selectedIds, ['shell'])
-const webTools = render({ tools: { shell: false, webSearch: true, wolfram: false } })
+const webTools = render({ tools: { shell: false, webSearch: true, custom: {} } })
 assert.deepEqual(webTools.children[1].props.selectedIds, ['search'])
-const bothTools = render({ tools: { shell: true, webSearch: true, wolfram: false } })
+const bothTools = render({ tools: { shell: true, webSearch: true, custom: {} } })
 assert.deepEqual(bothTools.children[1].props.selectedIds, ['shell', 'search'])
 assert.equal(triggerLabel(bothTools.children[1].props.anchor).children[0], 'tools.trigger({"value":"tools.shell + tools.search"})')
 
-// The availability snapshot filters the data table; the component polls the
-// Host route for it, and the smoke test exercises the pure filter directly.
+// The availability snapshot filters the built-in table plus the custom packs;
+// hidden/unavailable packs never reach the menu.
 assert.equal(typeof module.visibleToolItems, 'function', 'availability filter is exported')
-assert.deepEqual(module.visibleToolItems({ wolfram: false }).map(item => item.id), ['shell', 'search'])
-assert.deepEqual(module.visibleToolItems({ wolfram: true }).map(item => item.id), ['shell', 'search', 'wolfram'])
-assert.ok(module.visibleToolItems({ wolfram: true }).find(item => item.id === 'wolfram').icon !== undefined)
+assert.deepEqual(module.visibleToolItems({ custom: [] }).map(item => item.id), ['shell', 'search'])
+assert.deepEqual(
+  module.visibleToolItems({ custom: [{ id: 'wolfram', label: 'Wolfram', icon: 'wolfram', available: true }] })
+    .map(item => item.id),
+  ['shell', 'search', 'wolfram'],
+)
+assert.deepEqual(
+  module.visibleToolItems({ custom: [{ id: 'pack-x', label: 'X', icon: 'default', available: false }] })
+    .map(item => item.id),
+  ['shell', 'search'],
+)
+assert.ok(module.visibleToolItems({ custom: [{ id: 'wolfram', label: 'Wolfram', icon: 'wolfram', available: true }] })
+  .find(item => item.id === 'wolfram').icon !== undefined)
+
+// Pure helpers shared by the composer and the settings page.
+const customItems = module.visibleToolItems({
+  custom: [{ id: 'wolfram', label: 'Wolfram', icon: 'wolfram', available: true }],
+})
+assert.deepEqual(module.selectedToolIds(customItems, {
+  shell: false,
+  webSearch: false,
+  custom: { wolfram: true },
+}), ['wolfram'])
+const wolframItem = customItems.find(item => item.id === 'wolfram')
+assert.equal(module.toolCommand(wolframItem, true), '/chat-tools wolfram on')
+assert.equal(module.toolCommand(customItems[0], false), '/chat-tools shell off')
+assert.equal(module.sameTools(
+  { shell: false, webSearch: false, custom: {} },
+  { shell: false, webSearch: false, custom: {} },
+), true)
+assert.equal(module.sameTools(
+  { shell: false, webSearch: false, custom: { wolfram: true } },
+  { shell: false, webSearch: false, custom: {} },
+), false)
 
 // Clicking a tool item toggles it without closing the menu.
 commands.length = 0
@@ -194,9 +266,6 @@ assert.deepEqual(commands, ['/chat-tools shell off'])
 commands.length = 0
 webTools.children[1].props.onSelect('search')
 assert.deepEqual(commands, ['/chat-tools search off'])
-commands.length = 0
-module.visibleToolItems({ wolfram: true })
-assert.deepEqual(commands, [])
 
 // Permission picks close the menu and submit the single value.
 commands.length = 0
