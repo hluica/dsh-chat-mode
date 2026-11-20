@@ -231,6 +231,32 @@ Wolfram tools are disabled in chat mode. Ask the user to enable “Wolfram” fr
 - 用户以“据你所知，wolfram 标志性的多面体/星形 logo 的起源是？”提问；模型 0 次工具调用，直接用自然语言回答，并在结尾说明“没有确切的一手资料”，符合“默认直接作答 / 避免汇报腔 / 不确定时如实说明”的新规则。
 - 本会话未启用 Wolfram，因此动态 `chat_tool_guidance` 注入未触发；该路径由 `scripts/test.mjs` 与 `scripts/host-contract.mjs` 的现有断言覆盖。
 
+## 2026-11-20 移除 persona 中的 Wolfram 界面名
+
+### 目的与范围
+
+**问题**：persona prefix 的“界面功能名称”列表点名“Wolfram”，但 Wolfram 只是默认自定义包；MCP 不可用时工具菜单中没有该项，system prompt 不应向模型暴露一个可能不存在的界面名称。
+
+**目标/边界**：只改 `cordis.patch.yml` 的 persona prefix，把“Wolfram”从界面名称列表中移除并补入通用“工具”；不修改 Wolfram 的 guidance、denyReason、工具门控或设置页。
+
+### 可行性
+
+- persona 中 `{{chat_tool_guidance}}` 仍是唯一变量引用；Wolfram 的具体使用规则只在默认包已启用且可用时由该变量注入。
+- `scripts/host-contract.mjs` 只断言 persona 的 `complete: true`、`{{chat_tool_guidance}}` 存在与工具组合，不依赖“Wolfram”字样。
+- `cordis.patch.yml` 用 DSH 的 YAML schema（含 `!!js`）解析通过；persona 含唯一占位符且不含“Wolfram”。
+
+### 核心进路
+
+- 修改 persona 的“向用户解释能力限制”一行：使用“权限”“工作区内修改”“工具”“持久终端”“联网搜索”等通用界面名称。
+- 版本 `1.4.1 → 1.4.2`；README 的“系统指令联动”补一条说明。
+- 不修改 Wolfram `denyReason` / `guidance`：它们只在工具实际注册且被门控/启用时出现，属于正确的运行时提示。
+
+### 问题与解决办法
+
+- 默认 Wolfram 包可用并启用时，模型仍会通过 `chat_tool_guidance` 看到 Wolfram 规则；这是按需动态注入，符合“只在该工具可用时暴露”的目标。
+- 运行中的 Host 只在下一次重启时读取新的 persona；本轮完成静态解析、构建与测试，运行时提示词的最终确认留待下一次重启。
+- 验证结果：`npm run build` 全部通过；YAML 解析通过；persona 的 `{{chat_tool_guidance}}` 恰好 1 处，且不再包含“Wolfram”。
+
 # Chat Mode 工具配置页与可热插拔工具包（2026-11-20）
 
 ## 2026-11-20 独立工具配置文件、设置页与动态工具包

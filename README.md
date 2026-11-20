@@ -109,6 +109,7 @@ Wolfram 工具**不在 preset 内注册**：它们由 `@local/dsh-wolfram-mcp` �
 ### 系统指令联动
 
 - `cordis.patch.yml` 的 persona prefix 含 `{{chat_tool_guidance}}`；`preset.js` 在 preset scope 注册该变量，`index.js` 在 global scope 注册返回 `''` 的 fallback（preset scope 覆盖 global）。即使 preset 插件加载失败，persona 的严格插值也不会导致 prompt assembly 报错。
+- persona 不点名具体自定义包（包括 Wolfram）；向用户解释能力限制时统一使用界面上的“权限”“工作区内修改”“工具”“持久终端”“联网搜索”等功能名称，具体包名只在对应 guidance 注入时出现。
 - provider 每次 assembly 都会根据当前会话状态、配置包与工具注册表求值：对每个 `guidance` 非空、未隐藏、已勾选且至少有一个已注册工具的自定义包，注入其 guidance。默认 Wolfram 包的内容包括：
   - 复杂、易错或需要高可靠性的计算、符号推导、数据处理、可视化、形式化验证 → 应当调用 Wolfram 工具；
   - 简单常识算术、观点性问题、创意写作、纯粹的语言任务，或定性解释即可满足 → 直接以文字作答，不调用 Wolfram 工具；
@@ -284,7 +285,7 @@ plugin_manager install_bundle
 
 | 项目            | 值                                                                             |
 | --------------- | ------------------------------------------------------------------------------ |
-| 插件版本        | `1.4.1`                                                                                                          |
+| 插件版本        | `1.4.2`                                                                                                          |
 | 包名            | `@local/dsh-chat-mode`                                                                                           |
 | Loader entry id | `dsh-chat-mode`                                                                                                  |
 | preset id       | `chat`                                                                                                           |
