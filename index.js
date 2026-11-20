@@ -155,11 +155,15 @@ function candidateTools(ctx, config) {
     byName.set(definition.name, typeof definition.description === 'string' ? definition.description : '');
   }
   return [...byName.entries()]
-    .map(([name, description]) => ({
-      name,
-      description,
-      configured: config.tools.some((pack) => toolInConfig(pack, name)),
-    }))
+    .map(([name, description]) => {
+      const owner = config.tools.find((pack) => toolInConfig(pack, name));
+      return {
+        name,
+        description,
+        configured: owner !== undefined,
+        configuredBy: owner?.label ?? null,
+      };
+    })
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 

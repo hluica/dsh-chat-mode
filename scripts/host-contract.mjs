@@ -190,6 +190,8 @@ export async function probeHost({ root, patchId, check }) {
     check('candidates exclude built-in tools', !candidateNames.includes('bash') && !candidateNames.includes('read'), candidates.body);
     check('candidates mark configured Wolfram tools', candidatePayload.result.tools
       .find(tool => tool.name.startsWith('mcp__WolframLanguage__'))?.configured === true, candidates.body);
+    check('candidates name the configured pack', candidatePayload.result.tools
+      .find(tool => tool.name.startsWith('mcp__WolframLanguage__'))?.configuredBy === 'Wolfram', candidates.body);
     check('candidates include host-level tools', candidateNames.includes('working_directory'), candidates.body);
     check('candidates mark configured tools', candidatePayload.result.tools
       .find(tool => tool.name === 'working_directory')?.configured === false, candidates.body);
@@ -219,6 +221,8 @@ export async function probeHost({ root, patchId, check }) {
     const candidatesAfterAdd = payload(await request('/dsh-chat-mode/api/candidates'));
     check('new pack marks its tool configured', candidatesAfterAdd.result.tools
       .find(tool => tool.name === 'working_directory')?.configured === true, JSON.stringify(candidatesAfterAdd.result.tools));
+    check('new pack names itself as the tool owner', candidatesAfterAdd.result.tools
+      .find(tool => tool.name === 'working_directory')?.configuredBy === '工作目录', JSON.stringify(candidatesAfterAdd.result.tools));
 
     // ---- PATCH guidance and hidden ---------------------------------------
 

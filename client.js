@@ -180,14 +180,18 @@ window.__ModuleLoader__.load({
       'settings.addHint': '选择一个或多个工具；它们会作为一个菜单项出现在输入框左侧的“工具”菜单中。',
       'settings.menuName': '菜单名称',
       'settings.menuNamePlaceholder': '例如：工作目录',
-      'settings.guidance': 'chat-tool-guidance 提示词',
+      'settings.guidance': '系统提示词 guidance',
       'settings.guidanceHint': '可留空；留空时不向系统提示词注入内容。修改后点击“提交”保存。',
+      'settings.addGuidanceHint': '可留空；留空时不向系统提示词注入内容。',
       'settings.selectTools': '选择工具',
       'settings.refresh': '刷新工具列表',
       'settings.refreshing': '正在刷新…',
       'settings.loading': '正在加载…',
       'settings.noCandidates': '没有可添加的工具。',
       'settings.configured': '已配置',
+      'settings.configuredBy': '已配置：{label}',
+      'settings.configLoadFailed': '配置加载失败',
+      'settings.candidatesFailed': '工具列表加载失败',
       'settings.available': '可用',
       'settings.unavailable': '不可用',
       'settings.hidden': '已隐藏',
@@ -202,11 +206,12 @@ window.__ModuleLoader__.load({
       'settings.requestFailed': '请求失败',
       'settings.saveFailed': '保存失败',
       'settings.saved': '已保存。',
+      'settings.savedAdd': '已添加。新配置默认关闭，请在“工具”菜单中启用。',
       'settings.hiddenNotice': '已隐藏。',
       'settings.shownNotice': '已显示。',
       'settings.submit': '提交',
       'settings.discard': '放弃更改',
-      'settings.add': '添加并生效',
+      'settings.add': '添加配置',
       'settings.adding': '正在保存…',
       'settings.selectedCount': '已选 {n} 个',
       'settings.builtinNote': '内置工具（read、read_image、glob、grep、web_fetch、ask_user_question、持久终端、联网搜索）由代码固定，不在此页管理。',
@@ -236,14 +241,18 @@ window.__ModuleLoader__.load({
       'settings.addHint': 'Pick one or more tools; they become one item in the Tools menu left of the composer.',
       'settings.menuName': 'Menu name',
       'settings.menuNamePlaceholder': 'e.g. Working directory',
-      'settings.guidance': 'chat-tool-guidance prompt',
+      'settings.guidance': 'System prompt guidance',
       'settings.guidanceHint': 'Optional; when empty, nothing is added to the system prompt. Click “Submit” to save edits.',
+      'settings.addGuidanceHint': 'Optional; when empty, nothing is added to the system prompt.',
       'settings.selectTools': 'Choose tools',
       'settings.refresh': 'Refresh tool list',
       'settings.refreshing': 'Refreshing…',
       'settings.loading': 'Loading…',
       'settings.noCandidates': 'No tools can be added.',
       'settings.configured': 'Configured',
+      'settings.configuredBy': 'Configured: {label}',
+      'settings.configLoadFailed': 'Failed to load the configuration',
+      'settings.candidatesFailed': 'Failed to load the tool list',
       'settings.available': 'Available',
       'settings.unavailable': 'Unavailable',
       'settings.hidden': 'Hidden',
@@ -258,11 +267,12 @@ window.__ModuleLoader__.load({
       'settings.requestFailed': 'Request failed',
       'settings.saveFailed': 'Save failed',
       'settings.saved': 'Saved.',
+      'settings.savedAdd': 'Added. New packs are off by default; enable one from the Tools menu.',
       'settings.hiddenNotice': 'Hidden.',
       'settings.shownNotice': 'Shown.',
       'settings.submit': 'Submit',
       'settings.discard': 'Discard changes',
-      'settings.add': 'Add and apply',
+      'settings.add': 'Add configuration',
       'settings.adding': 'Saving…',
       'settings.selectedCount': '{n} selected',
       'settings.builtinNote': 'Built-in tools (read, read_image, glob, grep, web_fetch, ask_user_question, persistent shell, web search) are fixed in code and are not managed here.',
@@ -280,6 +290,7 @@ window.__ModuleLoader__.load({
     const STYLE_TEXT = `
 .dsh-chat-controls { display: inline-flex; align-items: center; gap: 6px; }
 .dsh-chat-trigger {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -338,14 +349,14 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion: reduce) {
   .dsh-chat-trigger, .dsh-chat-trigger-chevron { transition: none; }
 }
-.dsh-chat-settings { display: flex; flex-direction: column; gap: 16px; max-width: 820px; color: var(--dsw-alias-label-primary); }
-.dsh-chat-settings-title { margin: 0; font-size: 18px; font-weight: 600; }
+.dsh-chat-settings { display: flex; flex-direction: column; gap: 16px; max-width: 840px; padding: 4px 0 28px; color: var(--dsw-alias-label-primary); }
+.dsh-chat-settings-title { margin: 0; font-size: 16px; font-weight: 600; line-height: 24px; }
 .dsh-chat-settings-intro { margin: 0; font-size: 13px; color: var(--dsw-alias-label-tertiary); line-height: 1.6; }
-.dsh-chat-settings-meta { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.dsh-chat-settings-meta { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: .5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md, 12px); background: var(--dsw-alias-bg-layer-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .dsh-chat-settings-group { display: flex; flex-direction: column; gap: 10px; }
 .dsh-chat-settings-heading { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary); }
-.dsh-chat-pack { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); }
-.dsh-chat-pack--hidden { opacity: .72; border-style: dashed; }
+.dsh-chat-pack { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: .5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md, 12px); background: var(--dsw-alias-bg-layer-2); }
+.dsh-chat-pack--hidden { border-style: dashed; background: var(--dsw-alias-bg-layer-1); }
 .dsh-chat-pack-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .dsh-chat-pack-icon { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; }
 .dsh-chat-pack-title { font-size: 14px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
@@ -354,26 +365,26 @@ window.__ModuleLoader__.load({
 .dsh-chat-pack-row { display: flex; gap: 8px; font-size: 12px; line-height: 1.55; }
 .dsh-chat-pack-label { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary); }
 .dsh-chat-pack-tools { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--dsw-alias-label-secondary); }
-.dsh-chat-badge { font-size: 11px; line-height: 17px; padding: 0 7px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); border: 1px solid var(--dsw-alias-border-l2); white-space: nowrap; }
+.dsh-chat-badge { font-size: 11px; line-height: 17px; padding: 0 7px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); border: .5px solid var(--dsw-alias-border-l2); white-space: nowrap; }
 .dsh-chat-badge--ok { border-color: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-state-success-primary); }
 .dsh-chat-badge--warn { border-color: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary); }
 .dsh-chat-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .dsh-chat-field-label { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
-.dsh-chat-input, .dsh-chat-textarea { box-sizing: border-box; font: inherit; font-size: 12px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.dsh-chat-input, .dsh-chat-textarea { box-sizing: border-box; font: inherit; font-size: 12px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); border: .5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm, 8px); padding: 6px 8px; min-width: 0; }
 .dsh-chat-input { flex: 1; min-width: 160px; }
 .dsh-chat-textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
 .dsh-chat-input:focus-visible, .dsh-chat-textarea:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .dsh-chat-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.dsh-chat-button { appearance: none; border: 1px solid var(--dsw-alias-border-l2); background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 8px; cursor: pointer; }
-.dsh-chat-button:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2); }
+.dsh-chat-button { box-sizing: border-box; appearance: none; height: 30px; padding: 0 12px; border: .5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-sm, 8px); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; line-height: 18px; white-space: nowrap; cursor: pointer; }
+.dsh-chat-button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
 .dsh-chat-button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.dsh-chat-button:disabled { opacity: .5; cursor: default; }
-.dsh-chat-button--primary { border-color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-brand-primary); color: #fff; }
+.dsh-chat-button:disabled { opacity: .6; cursor: default; }
+.dsh-chat-button--primary { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-bg-layer-3); }
 .dsh-chat-hint { margin: 0; font-size: 11px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
-.dsh-chat-alert { margin: 0; padding: 8px 10px; border: 1px solid var(--dsw-alias-state-error-primary); border-radius: 8px; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
+.dsh-chat-alert { margin: 0; padding: 8px 10px; border: .5px solid var(--dsw-alias-state-error-primary); border-radius: var(--dsw-radius-sm, 8px); background: var(--dsw-alias-bg-layer-2); font-size: 12px; line-height: 1.5; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
 .dsh-chat-notice { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-state-success-primary); }
 .dsh-chat-candidates-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dsh-chat-candidates { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-bg-base); }
+.dsh-chat-candidates { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; padding: 8px; border: .5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md, 12px); background: var(--dsw-alias-bg-base); }
 .dsh-chat-candidate { display: flex; gap: 8px; align-items: flex-start; padding: 4px 6px; border-radius: 6px; font-size: 12px; cursor: pointer; }
 .dsh-chat-candidate:hover { background: var(--dsw-alias-bg-layer-2); }
 .dsh-chat-candidate--configured { opacity: .65; cursor: default; }
@@ -395,7 +406,7 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
         className: 'dsh-chat-trigger',
         disabled,
         title,
-        'aria-label': title,
+        'aria-label': `${title} ${label}`,
         'aria-expanded': open ? 'true' : 'false',
         ...(active ? { 'data-active': 'true' } : {}),
         onClick,
@@ -600,9 +611,13 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
       return payload.result
     }
 
-    /** Settings navigation icon: one shared tools glyph. */
-    function ChatModeToolsIcon({ size = 16 }) {
-      return ToolsIcon === undefined ? null : h(ToolsIcon, { size })
+    /** Settings navigation icon: one shared tools glyph that follows the selected state. */
+    function ChatModeToolsIcon({ size = 16, active = false }) {
+      if (ToolsIcon === undefined) return null
+      return h('span', {
+        style: { display: 'inline-flex', opacity: active ? 1 : 0.72 },
+        'aria-hidden': true,
+      }, h(ToolsIcon, { size }))
     }
 
     /**
@@ -634,15 +649,22 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
       const [custom, setCustom] = useState([])
       const [path, setPath] = useState('')
       const [configError, setConfigError] = useState(null)
+      const [configLoadError, setConfigLoadError] = useState(null)
       const [loading, setLoading] = useState(true)
       const [candidates, setCandidates] = useState(null)
+      const [candidatesError, setCandidatesError] = useState(null)
       const [candidatesLoading, setCandidatesLoading] = useState(false)
-      const [busy, setBusy] = useState(false)
+      const [pendingAction, setPendingAction] = useState(null)
       const [notice, setNotice] = useState(null)
+      const [addNotice, setAddNotice] = useState(null)
       const [label, setLabel] = useState('')
       const [guidance, setGuidance] = useState('')
       const [selected, setSelected] = useState([])
       const [drafts, setDrafts] = useState({})
+
+      const busy = pendingAction !== null
+      const configLocked = configError !== null || configLoadError !== null
+      const errorText = (error) => (error instanceof Error ? error.message : String(error))
 
       /** Adopt one `/tools` snapshot and keep unsaved drafts for remaining packs. */
       const applyConfigSnapshot = (snapshot) => {
@@ -651,6 +673,7 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
         setCustom(Array.isArray(snapshot?.custom) ? snapshot.custom : [])
         setPath(typeof snapshot?.path === 'string' ? snapshot.path : '')
         setConfigError(typeof snapshot?.error === 'string' && snapshot.error !== '' ? snapshot.error : null)
+        setConfigLoadError(null)
         setDrafts((previous) => {
           const next = {}
           for (const pack of nextConfig.tools ?? []) {
@@ -660,26 +683,34 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
         })
       }
 
+      /** Adopt one candidate list and drop selections that are no longer addable. */
+      const applyCandidates = (list) => {
+        const next = Array.isArray(list) ? list : []
+        setCandidates(next)
+        setCandidatesError(null)
+        setSelected((previous) => previous.filter((name) => next.some((candidate) => (
+          candidate.name === name && candidate.configured !== true
+        ))))
+      }
+
+      /** Settle the two independent reads so one failure never hides the other. */
+      const settle = (results) => {
+        const [configResult, candidateResult] = results
+        if (configResult.status === 'fulfilled') applyConfigSnapshot(configResult.value)
+        else setConfigLoadError(errorText(configResult.reason))
+        if (candidateResult.status === 'fulfilled') applyCandidates(candidateResult.value.tools)
+        else setCandidatesError(errorText(candidateResult.reason))
+      }
+
       // The page loads on entry; the Host registry is read at request time, so
       // this is the “entered the page” refresh required for the candidate list.
       useEffect(() => {
         let cancelled = false
         const load = async () => {
-          try {
-            const [snapshot, candidateResult] = await Promise.all([api.loadConfig(), api.loadCandidates()])
-            if (cancelled) return
-            applyConfigSnapshot(snapshot)
-            setCandidates(Array.isArray(candidateResult.tools) ? candidateResult.tools : [])
-          } catch (error) {
-            if (!cancelled) {
-              setNotice({
-                kind: 'error',
-                text: `${t('settings.requestFailed')}: ${error instanceof Error ? error.message : String(error)}`,
-              })
-            }
-          } finally {
-            if (!cancelled) setLoading(false)
-          }
+          const results = await Promise.allSettled([api.loadConfig(), api.loadCandidates()])
+          if (cancelled) return
+          settle(results)
+          setLoading(false)
         }
         void load()
         return () => { cancelled = true }
@@ -689,78 +720,67 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
         if (busy) return
         setCandidatesLoading(true)
         setNotice(null)
-        try {
-          const [snapshot, candidateResult] = await Promise.all([api.loadConfig(), api.loadCandidates()])
-          applyConfigSnapshot(snapshot)
-          setCandidates(Array.isArray(candidateResult.tools) ? candidateResult.tools : [])
-        } catch (error) {
-          setNotice({
-            kind: 'error',
-            text: `${t('settings.requestFailed')}: ${error instanceof Error ? error.message : String(error)}`,
-          })
-        } finally {
-          setCandidatesLoading(false)
-        }
+        const results = await Promise.allSettled([api.loadConfig(), api.loadCandidates()])
+        settle(results)
+        setCandidatesLoading(false)
       }
 
       const saveNew = async () => {
         const menuName = label.trim()
-        if (busy || menuName === '' || selected.length === 0 || configError !== null) return
-        setBusy(true)
+        if (busy || configLocked || menuName === '' || selected.length === 0) return
+        setPendingAction('add')
         setNotice(null)
+        setAddNotice(null)
         try {
-          await api.addTool({ label: menuName, tools: selected, guidance })
+          const snapshot = await api.addTool({ label: menuName, tools: selected, guidance })
           setLabel('')
           setGuidance('')
           setSelected([])
-          const [snapshot, candidateResult] = await Promise.all([api.loadConfig(), api.loadCandidates()])
+          // The POST returns the complete snapshot; adopt it directly. A later
+          // candidate refresh failure is not a save failure.
           applyConfigSnapshot(snapshot)
-          setCandidates(Array.isArray(candidateResult.tools) ? candidateResult.tools : [])
-          setNotice({ kind: 'ok', text: t('settings.saved') })
+          setAddNotice(t('settings.savedAdd'))
+          try {
+            const candidateResult = await api.loadCandidates()
+            applyCandidates(candidateResult.tools)
+          } catch (error) {
+            setCandidatesError(errorText(error))
+          }
         } catch (error) {
-          setNotice({
-            kind: 'error',
-            text: `${t('settings.saveFailed')}: ${error instanceof Error ? error.message : String(error)}`,
-          })
+          setNotice({ kind: 'error', text: `${t('settings.saveFailed')}: ${errorText(error)}` })
         } finally {
-          setBusy(false)
+          setPendingAction(null)
         }
       }
 
       const setHidden = async (pack, hidden) => {
-        if (busy || configError !== null) return
-        setBusy(true)
+        if (busy || configLocked) return
+        setPendingAction(`hide:${pack.id}`)
         setNotice(null)
         try {
           const snapshot = await api.updateTool({ id: pack.id, hidden })
           applyConfigSnapshot(snapshot)
           setNotice({ kind: 'ok', text: hidden ? t('settings.hiddenNotice') : t('settings.shownNotice') })
         } catch (error) {
-          setNotice({
-            kind: 'error',
-            text: `${t('settings.saveFailed')}: ${error instanceof Error ? error.message : String(error)}`,
-          })
+          setNotice({ kind: 'error', text: `${t('settings.saveFailed')}: ${errorText(error)}` })
         } finally {
-          setBusy(false)
+          setPendingAction(null)
         }
       }
 
       const submitGuidance = async (pack) => {
         const draft = drafts[pack.id] ?? ''
-        if (busy || configError !== null || draft === (pack.guidance ?? '')) return
-        setBusy(true)
+        if (busy || configLocked || draft === (pack.guidance ?? '')) return
+        setPendingAction(`guidance:${pack.id}`)
         setNotice(null)
         try {
           const snapshot = await api.updateTool({ id: pack.id, guidance: draft })
           applyConfigSnapshot(snapshot)
           setNotice({ kind: 'ok', text: t('settings.saved') })
         } catch (error) {
-          setNotice({
-            kind: 'error',
-            text: `${t('settings.saveFailed')}: ${error instanceof Error ? error.message : String(error)}`,
-          })
+          setNotice({ kind: 'error', text: `${t('settings.saveFailed')}: ${errorText(error)}` })
         } finally {
-          setBusy(false)
+          setPendingAction(null)
         }
       }
 
@@ -769,7 +789,7 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
       }
 
       const toggleCandidate = (name) => {
-        if (busy) return
+        if (busy || configLocked) return
         setSelected(previous => (previous.includes(name)
           ? previous.filter(entry => entry !== name)
           : [...previous, name]))
@@ -778,7 +798,6 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
       const packs = config?.tools ?? []
       const customById = new Map(custom.map(pack => [pack.id, pack]))
       const selectedSet = new Set(selected)
-      const configLocked = configError !== null
 
       return h('section', { className: 'dsh-chat-settings' },
         h('h2', { className: 'dsh-chat-settings-title' }, t('settings.title')),
@@ -787,20 +806,28 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
         h('div', { className: 'dsh-chat-settings-meta' },
           h('span', { className: 'dsh-chat-field-label' }, t('settings.configPath')),
           h('code', null, path === '' ? t('settings.configPathUnknown') : path),
-          configLocked
-            ? h('p', { className: 'dsh-chat-alert' }, `${t('settings.configError')}: ${configError}`)
+          configError !== null
+            ? h('p', { className: 'dsh-chat-alert', role: 'alert' }, `${t('settings.configError')}: ${configError}`)
+            : null,
+          configLoadError !== null
+            ? h('p', { className: 'dsh-chat-alert', role: 'alert' }, `${t('settings.configLoadFailed')}: ${configLoadError}`)
             : null,
           h('span', { className: 'dsh-chat-hint' }, t('settings.configEditable')),
         ),
 
         notice === null
           ? null
-          : h('p', { className: notice.kind === 'error' ? 'dsh-chat-alert' : 'dsh-chat-notice' }, notice.text),
+          : h('p', {
+            className: notice.kind === 'error' ? 'dsh-chat-alert' : 'dsh-chat-notice',
+            role: notice.kind === 'error' ? 'alert' : 'status',
+          }, notice.text),
 
         loading
           ? h('p', { className: 'dsh-chat-hint' }, t('settings.loading'))
-          : h('div', { className: 'dsh-chat-settings-group' },
-            h('h3', { className: 'dsh-chat-settings-heading' }, t('settings.current')),
+          : configLoadError !== null
+            ? h('p', { className: 'dsh-chat-alert', role: 'alert' }, `${t('settings.configLoadFailed')}: ${configLoadError}`)
+            : h('div', { className: 'dsh-chat-settings-group' },
+              h('h3', { className: 'dsh-chat-settings-heading' }, t('settings.current')),
             h('p', { className: 'dsh-chat-hint' }, t('settings.hiddenHint')),
             packs.length === 0
               ? h('p', { className: 'dsh-chat-hint' }, t('settings.empty'))
@@ -827,6 +854,7 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
                     h('button', {
                       type: 'button',
                       className: 'dsh-chat-button dsh-chat-pack-action',
+                      'aria-label': `${hidden ? t('settings.show') : t('settings.hide')} ${pack.label}`,
                       disabled: busy || configLocked,
                       onClick: () => { void setHidden(pack, !hidden) },
                     }, hidden ? t('settings.show') : t('settings.hide')),
@@ -841,23 +869,28 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
                       className: 'dsh-chat-textarea',
                       value: draft,
                       spellCheck: false,
-                      disabled: busy,
+                      maxLength: 16000,
+                      'aria-label': `${pack.label} ${t('settings.guidance')}`,
+                      disabled: configLocked || pendingAction === `guidance:${pack.id}`,
                       onChange: (event) => {
                         const value = event.target.value
                         setDrafts(previous => ({ ...previous, [pack.id]: value }))
                       },
                     }),
+                    h('span', { className: 'dsh-chat-hint' }, t('settings.guidanceHint')),
                   ),
                   h('div', { className: 'dsh-chat-actions' },
                     h('button', {
                       type: 'button',
                       className: 'dsh-chat-button dsh-chat-button--primary',
+                      'aria-label': `${t('settings.submit')} ${pack.label}`,
                       disabled: busy || configLocked || !dirty,
                       onClick: () => { void submitGuidance(pack) },
                     }, t('settings.submit')),
                     h('button', {
                       type: 'button',
                       className: 'dsh-chat-button',
+                      'aria-label': `${t('settings.discard')} ${pack.label}`,
                       disabled: busy || configLocked || !dirty,
                       onClick: () => discardGuidance(pack),
                     }, t('settings.discard')),
@@ -881,32 +914,36 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
             }, candidatesLoading ? t('settings.refreshing') : t('settings.refresh')),
             h('span', { className: 'dsh-chat-hint' }, t('settings.selectedCount', { n: selected.length })),
           ),
-          candidates === null
-            ? h('p', { className: 'dsh-chat-hint' }, t('settings.loading'))
-            : candidates.length === 0
-              ? h('p', { className: 'dsh-chat-hint' }, t('settings.noCandidates'))
-              : h('div', { className: 'dsh-chat-candidates' },
-                candidates.map((candidate) => h('label', {
-                  key: candidate.name,
-                  className: 'dsh-chat-candidate' + (candidate.configured ? ' dsh-chat-candidate--configured' : ''),
-                },
-                  h('input', {
-                    type: 'checkbox',
-                    checked: selectedSet.has(candidate.name),
-                    disabled: busy || candidate.configured,
-                    onChange: () => toggleCandidate(candidate.name),
-                  }),
-                  h('span', { className: 'dsh-chat-candidate-main' },
-                    h('code', { className: 'dsh-chat-candidate-name' }, candidate.name),
-                    candidate.configured
-                      ? h('span', { className: 'dsh-chat-badge' }, t('settings.configured'))
-                      : null,
-                    candidate.description
-                      ? h('span', { className: 'dsh-chat-candidate-desc' }, candidate.description)
-                      : null,
-                  ),
-                )),
-              ),
+          candidatesError !== null
+            ? h('p', { className: 'dsh-chat-alert', role: 'alert' }, `${t('settings.candidatesFailed')}: ${candidatesError}`)
+            : candidates === null
+              ? h('p', { className: 'dsh-chat-hint' }, t('settings.loading'))
+              : candidates.length === 0
+                ? h('p', { className: 'dsh-chat-hint' }, t('settings.noCandidates'))
+                : h('div', { className: 'dsh-chat-candidates' },
+                  candidates.map((candidate) => h('label', {
+                    key: candidate.name,
+                    className: 'dsh-chat-candidate' + (candidate.configured ? ' dsh-chat-candidate--configured' : ''),
+                  },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: selectedSet.has(candidate.name),
+                      disabled: candidate.configured || configLocked || pendingAction === 'add',
+                      onChange: () => toggleCandidate(candidate.name),
+                    }),
+                    h('span', { className: 'dsh-chat-candidate-main' },
+                      h('code', { className: 'dsh-chat-candidate-name' }, candidate.name),
+                      candidate.configured
+                        ? h('span', { className: 'dsh-chat-badge' }, candidate.configuredBy
+                          ? t('settings.configuredBy', { label: candidate.configuredBy })
+                          : t('settings.configured'))
+                        : null,
+                      candidate.description
+                        ? h('span', { className: 'dsh-chat-candidate-desc' }, candidate.description)
+                        : null,
+                    ),
+                  )),
+                ),
           h('label', { className: 'dsh-chat-field' },
             h('span', { className: 'dsh-chat-field-label' }, t('settings.menuName')),
             h('input', {
@@ -915,7 +952,8 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
               value: label,
               placeholder: t('settings.menuNamePlaceholder'),
               spellCheck: false,
-              disabled: busy,
+              maxLength: 64,
+              disabled: pendingAction === 'add',
               onChange: (event) => setLabel(event.target.value),
             }),
           ),
@@ -925,10 +963,11 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
               className: 'dsh-chat-textarea',
               value: guidance,
               spellCheck: false,
-              disabled: busy,
+              maxLength: 16000,
+              disabled: pendingAction === 'add',
               onChange: (event) => setGuidance(event.target.value),
             }),
-            h('span', { className: 'dsh-chat-hint' }, t('settings.guidanceHint')),
+            h('span', { className: 'dsh-chat-hint' }, t('settings.addGuidanceHint')),
           ),
           h('div', { className: 'dsh-chat-actions' },
             h('button', {
@@ -936,8 +975,11 @@ body[data-dsh-chat-mode="1"] [data-slot="conversation.input.permission"] { displ
               className: 'dsh-chat-button dsh-chat-button--primary',
               disabled: busy || configLocked || label.trim() === '' || selected.length === 0,
               onClick: () => { void saveNew() },
-            }, busy ? t('settings.adding') : t('settings.add')),
+            }, pendingAction === 'add' ? t('settings.adding') : t('settings.add')),
           ),
+          addNotice === null
+            ? null
+            : h('p', { className: 'dsh-chat-notice', role: 'status' }, addNotice),
           h('p', { className: 'dsh-chat-hint' }, t('settings.newPackOff')),
         ),
       )

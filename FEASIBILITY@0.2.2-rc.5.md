@@ -555,13 +555,24 @@ rows = ctx.slots.entries('settings.section')
 
 - `npm run build`：全部通过（layout / dependencies / manifest / parse / npm test / runtime host contract）。
 - `npm test`：`scripts/test.mjs` 与 `scripts/client-test.mjs` 全部通过。
-- `scripts/host-contract.mjs`：59 项断言全部通过（五个 API、配置写入、隐藏/显示、guidance、owner-only、权限 pin）。
-- 待用户重启 DSH 后做运行时确认：
-  - Settings 中顺序为“Agent 预设文本 → Chat Mode工具配置 → Wolfram MCP 设置”；
-  - 页面显示默认 Wolfram 配置与 guidance；
-  - 新增 `working_directory` 为“工作目录”，保存后菜单出现，启用后模型可见并可调用；
-  - guidance 非空时出现在系统提示词的 `chat_tool_guidance` 位置；
-  - 隐藏后菜单消失、模型工具被 deny，重新显示后恢复；
-  - 编辑 guidance 后“提交”生效，“放弃更改”恢复；
-  - 保存后无需重启 Host 即生效（客户端菜单最多 3 秒轮询）；
-  - 配置文件非法时页面显示错误，preset 回退默认 Wolfram 行为。
+- `scripts/host-contract.mjs`：初版 59 项断言全部通过；UX 修复后增至 61 项，全部通过（五个 API、配置写入、隐藏/显示、guidance、owner-only、权限 pin、`configuredBy`）。
+
+**运行时验证（2026-11-20，重启后）**
+
+- 配置页 slot：`settings.section` 的 active occupant 为 `chat-mode-tools`，order `21.5`，位于 `agent-preset-text`（21）与 `wolfram-mcp`（22）之间；`settings.section.icon` 的 `chat-mode-tools` active；composer 的 `conversation.input.left` `chat-mode-controls` active。
+- 配置文件：`~/.dsh/dsh-chat-mode/tools.json` 在重启后自动创建，内容为默认 Wolfram 包（1050 bytes）。
+- API：通过本地 owner-only 路由做了一次读写往返（临时包 `__chat_mode_runtime_probe__`，`working_directory` + default icon + guidance）：GET `/state`、GET `/tools`、GET `/candidates` 正常；POST 追加、PATCH guidance、PATCH hidden、GET `/state` 隐藏/恢复均符合预期；测试后已把配置文件恢复为默认 Wolfram-only，并再次通过 GET `/tools` 确认。
+- 非 Chat 会话的工具列表未受影响（当前会话的 Tool inspect 仍只显示其自身工具）。
+- UI/UX 审查：按 `references/verification.md` 进行了一次 UI/UX 审查。由于本会话无浏览器控制，**亮/暗主题的实际渲染、菜单点击与排版未能目视验证**；审查基于源码、主题 token、live slot 与 API 证据。
+- 审查发现并已修复：
+  - 主按钮使用 brand 填充 + 白字，在暗色主题/亮色 hover 下对比度不足；改为 layer-3 背景 + brand 边框/文字，hover 使用 `--dsw-alias-interactive-bg-hover`。
+  - 首次加载失败会把空态与加载失败混同；改为 `Promise.allSettled` 独立结算，新增 config load error / candidate load error 状态。
+  - 新增成功后二次刷新失败会被误报为保存失败；改为直接采用 POST 返回的完整 snapshot，候选刷新失败单独提示。
+  - 新增表单提示与按钮文案不一致；新增区改用 `addGuidanceHint`、按钮改为“添加配置”，并增加就地成功提示。
+  - 全局 `busy` 造成跨包误导；改为 `pendingAction` 区分 add/hide/guidance，仅锁定相关控件。
+  - 候选选择刷新后不收敛；刷新时剔除已配置/已不存在的选择；候选行显示占用包名（`configuredBy`）。
+  - 可访问性：per-pack 控件带包名 aria-label；notice 加 `role=status/alert`；触发器 aria-label 带当前值；设置页图标响应 active；隐藏卡不再整体降透明度。
+  - 视觉一致性：设置页标题 16px、`.5px` 边框、`--dsw-radius-md/sm`、layer-2 卡片，与相邻 Wolfram 页对齐；按钮/触发器补 `box-sizing`。
+  - 输入约束：菜单名 `maxLength=64`、guidance `maxLength=16000`；guidance 文案改为“系统提示词 guidance”，避免与真实变量 `chat_tool_guidance` 混淆。
+- 上述修复后重新执行 `npm run build`：全部通过。
+- 由于 Host 半新增了 `configuredBy` 字段，且客户端 bundle 可能被 Host 缓存，修复后的最终运行时确认仍需再次重启 DSH/刷新页面；待用户完成最终重启后补记 UI 目视结果。
