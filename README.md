@@ -48,6 +48,8 @@ Settings 中新增 **Chat Mode工具配置** 页，固定排在“Agent 预设�
 
 配置文件为 `$DSH_HOME/dsh-chat-mode/tools.json`（默认 `~/.dsh/dsh-chat-mode/tools.json`），也可以直接编辑；文件非法时页面显示错误，插件回退到默认 Wolfram 包。菜单名称与工具列表在创建后不在页面内编辑，需要修改时直接编辑配置文件。
 
+可配置的候选中**永久排除** Host 始终注入的五个工具：`list_mcp_resource_templates`、`list_mcp_resources`、`load_workspace_dependencies`、`read_mcp_resource`、`working_directory`。它们由 Host 组合固定注入，插件无法门控；候选列表不显示它们，配置校验也会拒绝手工加入。
+
 ### 权限与写入
 
 - 允许的权限预设只有 `read-only` 与 `workspace-write`，两者的 approval policy 都是 `ask`。
@@ -172,7 +174,7 @@ plugin_manager install_bundle
 - **CSS 隐藏 shipped 权限控件**：依赖 renderer 的 `data-slot` 锚点；如果未来版本重命名该锚点，控件会重新出现，但 Host 端仍然拒绝完全权限。
 - **preset 不是安全沙箱**：DSH 文档明确 presets 可以执行 Host 代码。这里的权限锁是功能/策略层，不是安全边界；真正的文件限制来自 sandbox policy 与 approval。
 - **支持在空白会话中切换到 Chat**：`agent-preset/selected` 事件会在下一轮前应用工具 restriction；`/permission` 与 restriction 随 preset 生命周期释放/重注册。已开始（有 turn）的会话仍受 DSH 的 blank-session 限制，不能切换。
-- **Host 级工具可以被配置**：例如 `team_task_*`、`working_directory`、`load_workspace_dependencies`、MCP 资源工具由 Host 组合提供，所有预设都会继承；它们在设置页的候选列表中，可以加入自定义包并由 Chat 门控。内置工具（read/read_image/glob/grep/web_fetch/ask_user_question、持久终端、web_search）不在此列。
+- **Host 级工具部分可配置**：例如 `team_task_*` 等 Host 工具在设置页候选列表中，可以加入自定义包并由 Chat 门控；但 Host 始终注入的 `list_mcp_resource_templates`、`list_mcp_resources`、`load_workspace_dependencies`、`read_mcp_resource`、`working_directory` 不在此列，插件无法门控它们。内置工具（read/read_image/glob/grep/web_fetch/ask_user_question、持久终端、web_search）同样不在此列。
 - **设置页不提供删除**：隐藏只会从“工具”菜单移除菜单项并暂停其工具与提示词，配置仍保留；需要彻底移除时直接编辑配置文件。菜单名称、工具列表和图标在创建后不在页面内编辑。
 - **新包默认关闭**：保存后包立即进入 deny 列表并出现在菜单中，需要用户在“工具”菜单启用；这与现有 Wolfram 行为一致。
 - **图标只支持 `wolfram` / `default`**：配置文件的 `icon` 值只映射到插件内的两个渲染器；未知值回退默认图标，不执行配置中的任意代码。
@@ -282,7 +284,7 @@ plugin_manager install_bundle
 
 | 项目            | 值                                                                             |
 | --------------- | ------------------------------------------------------------------------------ |
-| 插件版本        | `1.4.0`                                                                                                          |
+| 插件版本        | `1.4.1`                                                                                                          |
 | 包名            | `@local/dsh-chat-mode`                                                                                           |
 | Loader entry id | `dsh-chat-mode`                                                                                                  |
 | preset id       | `chat`                                                                                                           |
@@ -297,6 +299,7 @@ plugin_manager install_bundle
 | 权限命令        | `/permission read-only\|workspace-write`（preset 作用域 shadow）                                                 |
 | 工具命令        | `/chat-tools [mode off\|shell\|search\|both\|wolfram\|all] [shell on\|off] [search on\|off] [<pack-id> on\|off]` |
 | 工具菜单项      | `shell`（持久终端）、`search`（联网搜索）、自定义包（默认 `wolfram`，按可用性显示、可隐藏），多选               |
+| 始终注入工具    | `list_mcp_resource_templates`、`list_mcp_resources`、`load_workspace_dependencies`、`read_mcp_resource`、`working_directory`（不入候选、配置校验拒绝） |
 | Wolfram 工具前缀 | `mcp__WolframLanguage__`                                                                                        |
 | prompt 变量     | `chat_tool_guidance`（preset scope 覆盖 global fallback）                                                        |
 | 客户端 slot     | `conversation.input.left` / `chat-mode-controls`；`settings.section` / `chat-mode-tools`；`settings.section.icon` / `chat-mode-tools` |

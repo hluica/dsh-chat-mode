@@ -576,3 +576,14 @@ rows = ctx.slots.entries('settings.section')
   - 输入约束：菜单名 `maxLength=64`、guidance `maxLength=16000`；guidance 文案改为“系统提示词 guidance”，避免与真实变量 `chat_tool_guidance` 混淆。
 - 上述修复后重新执行 `npm run build`：全部通过。
 - 由于 Host 半新增了 `configuredBy` 字段，且客户端 bundle 可能被 Host 缓存，修复后的最终运行时确认仍需再次重启 DSH/刷新页面；待用户完成最终重启后补记 UI 目视结果。
+- 用户在 2026-11-20 再次重启并目视检查后确认：设置页视觉与交互无问题，无需调整。
+
+#### 追加修复（2026-11-20）：始终注入工具退出候选列表
+
+**目的与范围**：`list_mcp_resource_templates`、`list_mcp_resources`、`load_workspace_dependencies`、`read_mcp_resource`、`working_directory` 五项工具由 Host 组合始终注入 Chat 会话，插件无法通过 pack 门控。要求从设置页的工具列表中永久隐藏它们，且不可取消；不改变其他工具或内置工具行为。
+
+**可行性/证据**：当前 `GET /candidates` 返回包含这五项（用户在实际 Chat 会话中确认它们始终注入）；`candidateTools` 已按 `BUILTIN_TOOL_NAMES` 过滤，增加一个固定的 `ALWAYS_INJECTED_TOOL_NAMES` 集合即可；`normalizeConfig` / `appendToolPack` 已对内置工具拒绝，扩展同一路径即可拒绝手工加入。
+
+**核心进路**：`config.js` 新增固定常量与校验；`index.js` 在候选列表过滤；设置页 builtin note 与 README 说明；版本 `1.4.0 → 1.4.1`；测试改为使用 `team_task_create` 作为可配置 Host 工具，并新增五项被拒绝/不出现的断言。
+
+**验证结果**：`npm run build` 全部通过；`npm test` 通过；`host-contract` 新增候选排除/包含检查并全部通过。运行时最终确认需再重启 DSH。

@@ -214,7 +214,7 @@ window.__ModuleLoader__.load({
       'settings.add': '添加配置',
       'settings.adding': '正在保存…',
       'settings.selectedCount': '已选 {n} 个',
-      'settings.builtinNote': '内置工具（read、read_image、glob、grep、web_fetch、ask_user_question、持久终端、联网搜索）由代码固定，不在此页管理。',
+      'settings.builtinNote': '内置工具（read、read_image、glob、grep、web_fetch、ask_user_question、持久终端、联网搜索）由代码固定，不在此页管理；Host 始终注入的 MCP 资源、工作区依赖与工作目录工具也不在候选中。',
       'settings.newPackOff': '新配置默认关闭；保存后请在输入框左侧的“工具”菜单中启用。',
       'settings.unsaved': '有未提交的更改',
     }
@@ -275,7 +275,7 @@ window.__ModuleLoader__.load({
       'settings.add': 'Add configuration',
       'settings.adding': 'Saving…',
       'settings.selectedCount': '{n} selected',
-      'settings.builtinNote': 'Built-in tools (read, read_image, glob, grep, web_fetch, ask_user_question, persistent shell, web search) are fixed in code and are not managed here.',
+      'settings.builtinNote': 'Built-in tools (read, read_image, glob, grep, web_fetch, ask_user_question, persistent shell, web search) are fixed in code and are not managed here. Host-provided MCP resource, workspace-dependency, and working-directory tools are always injected and are not offered here.',
       'settings.newPackOff': 'New packs are off by default; enable one from the Tools menu left of the composer after saving.',
       'settings.unsaved': 'Unsaved changes',
     }

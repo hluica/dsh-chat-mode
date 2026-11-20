@@ -24,6 +24,7 @@
  */
 
 import {
+  ALWAYS_INJECTED_TOOL_NAMES,
   BUILTIN_TOOL_NAMES,
   appendToolPack,
   ensureConfigFile,
@@ -57,6 +58,7 @@ const MAX_BODY_BYTES = 256 * 1024;
 
 /** Built-in names never offered by the settings page's candidate list. */
 const BUILTIN_TOOL_SET = new Set(BUILTIN_TOOL_NAMES);
+const ALWAYS_INJECTED_TOOL_SET = new Set(ALWAYS_INJECTED_TOOL_NAMES);
 
 /**
  * Send one JSON response without throwing into the route handler.
@@ -152,6 +154,7 @@ function candidateTools(ctx, config) {
   for (const definition of definitions) {
     if (typeof definition?.name !== 'string' || definition.name === '') continue;
     if (BUILTIN_TOOL_SET.has(definition.name)) continue;
+    if (ALWAYS_INJECTED_TOOL_SET.has(definition.name)) continue;
     byName.set(definition.name, typeof definition.description === 'string' ? definition.description : '');
   }
   return [...byName.entries()]

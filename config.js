@@ -78,7 +78,21 @@ export const BUILTIN_TOOL_NAMES = Object.freeze([
   'apply_patch',
 ]);
 
+/**
+ * Host-provided tools that the chat composition always injects. They cannot be
+ * gated or configured by a pack, so they are permanently excluded from the
+ * settings page's candidate list and rejected by configuration validation.
+ */
+export const ALWAYS_INJECTED_TOOL_NAMES = Object.freeze([
+  'list_mcp_resource_templates',
+  'list_mcp_resources',
+  'load_workspace_dependencies',
+  'read_mcp_resource',
+  'working_directory',
+]);
+
 const BUILTIN_TOOL_SET = new Set(BUILTIN_TOOL_NAMES);
+const ALWAYS_INJECTED_TOOL_SET = new Set(ALWAYS_INJECTED_TOOL_NAMES);
 
 /** Pack ids reserved by the built-in packs and the default Wolfram pack. */
 export const RESERVED_PACK_IDS = Object.freeze(['shell', 'search', WOLFRAM_PACK_ID]);
@@ -281,6 +295,10 @@ function normalizePack(raw, index, state) {
       const name = value.trim();
       if (BUILTIN_TOOL_SET.has(name)) {
         state.errors.push({ path: `${base}.tools`, message: `"${name}" 是内置工具，不能配置` });
+        return;
+      }
+      if (ALWAYS_INJECTED_TOOL_SET.has(name)) {
+        state.errors.push({ path: `${base}.tools`, message: `"${name}" 是 Host 始终注入的工具，不能配置` });
         return;
       }
       if (!names.includes(name)) names.push(name);
@@ -516,6 +534,10 @@ export function appendToolPack(config, input) {
       const name = value.trim();
       if (BUILTIN_TOOL_SET.has(name)) {
         errors.push({ path: 'tools', message: `"${name}" 是内置工具，不能配置` });
+        continue;
+      }
+      if (ALWAYS_INJECTED_TOOL_SET.has(name)) {
+        errors.push({ path: 'tools', message: `"${name}" 是 Host 始终注入的工具，不能配置` });
         continue;
       }
       if (!names.includes(name)) names.push(name);

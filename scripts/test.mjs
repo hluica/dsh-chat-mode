@@ -222,7 +222,7 @@ function command(list, name) {
 
 const WOLFRAM_EVALUATOR = 'mcp__WolframLanguage__WolframLanguageEvaluator'
 const WOLFRAM_CONTEXT = 'mcp__WolframLanguage__WolframLanguageContext'
-const WORKDIR = 'working_directory'
+const TEST_TOOL = 'team_task_create'
 
 // 1. Fresh Agent: read-only permission and both built-in advanced tools hidden.
 // Without Wolfram tools there is no Wolfram deny entry, and the projection is
@@ -499,28 +499,28 @@ const WORKDIR = 'working_directory'
       ...defaultDoc.tools,
       {
         id: 'pack-workdir',
-        label: '工作目录',
+        label: '团队任务',
         icon: 'default',
-        tools: [WORKDIR],
-        guidance: '工作目录工具：\n- 仅在用户要求查看目录时使用。',
+        tools: [TEST_TOOL],
+        guidance: '团队任务工具：\n- 仅在用户要求时使用。',
       },
     ],
   })
 
-  const h = await boot({ tools: ['bash', 'web_search', WORKDIR] })
+  const h = await boot({ tools: ['bash', 'web_search', TEST_TOOL] })
   h.handlers.get('agent/created')({ agent: h.agent, source: 'startup' })
-  assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search', WORKDIR] })
+  assert.deepEqual(h.restrictions[0].filter, { deny: ['bash', 'web_search', TEST_TOOL] })
 
   const guard = h.handlers.get('tools/pre-execute')
-  const denied = await guard({ agent: h.agent, name: WORKDIR }, async () => ({ kind: 'allow' }))
+  const denied = await guard({ agent: h.agent, name: TEST_TOOL }, async () => ({ kind: 'allow' }))
   assert.equal(denied.kind, 'deny')
-  assert.match(denied.reason, /工作目录/u)
+  assert.match(denied.reason, /团队任务/u)
 
   const enabled = h.runCommand('chat-tools', ' pack-workdir on')
   assert.equal(enabled.kind, 'success')
   assert.deepEqual(h.projection.custom, { 'pack-workdir': true })
   assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
-  assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /工作目录工具/u)
+  assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /团队任务工具/u)
 
   const hidden = configModule.updateToolPack(
     configModule.getToolsConfig().config,
@@ -531,7 +531,7 @@ const WORKDIR = 'working_directory'
   setConfig(hidden.config)
   h.handlers.get('chat-mode/config-changed')()
   assert.deepEqual(h.projection.custom, { 'pack-workdir': true }, 'hiding must not rewrite the session choice')
-  assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search', WORKDIR] })
+  assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search', TEST_TOOL] })
   assert.equal(h.variables.get('chat_tool_guidance')({ agent: h.agent }), '')
   const rejected = h.runCommand('chat-tools', ' pack-workdir on')
   assert.equal(rejected.kind, 'error')
@@ -546,7 +546,7 @@ const WORKDIR = 'working_directory'
   setConfig(shown.config)
   h.handlers.get('chat-mode/config-changed')()
   assert.deepEqual(h.restrictions.at(-1).filter, { deny: ['bash', 'web_search'] })
-  assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /工作目录工具/u)
+  assert.match(h.variables.get('chat_tool_guidance')({ agent: h.agent }), /团队任务工具/u)
 
   resetConfig()
 }
@@ -593,6 +593,20 @@ const WORKDIR = 'working_directory'
   assert.equal(report.kind, 'success')
   assert.match(report.text, /wolfram=unavailable/u)
   resetConfig()
+}
+
+// 17. Host-provided tools that the chat composition always injects are never
+// configurable: the settings page candidate list hides them and the config
+// validator rejects a hand-edited entry.
+{
+  for (const name of configModule.ALWAYS_INJECTED_TOOL_NAMES) {
+    const rejected = configModule.normalizeConfig({
+      version: 1,
+      tools: [{ id: 'pack-host', label: `Host ${name}`, icon: 'default', tools: [name] }],
+    })
+    assert.equal(rejected.ok, false, `${name} must be rejected`)
+    assert.match(configModule.errorText(rejected.errors), /始终注入/u)
+  }
 }
 
 console.log('chat-mode preset: all logic checks passed')

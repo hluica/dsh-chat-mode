@@ -71,6 +71,7 @@ export async function probeHost({ root, patchId, check }) {
       { name: 'bash' },
       { name: 'mcp__WolframLanguage__WolframLanguageEvaluator', description: 'Evaluate Wolfram Language.' },
       { name: 'working_directory', description: 'Show or change the working directory.' },
+      { name: 'team_task_create', description: 'Create a shared team task.' },
     ];
     const apiCtx = {
       webServer: {
@@ -192,37 +193,45 @@ export async function probeHost({ root, patchId, check }) {
       .find(tool => tool.name.startsWith('mcp__WolframLanguage__'))?.configured === true, candidates.body);
     check('candidates name the configured pack', candidatePayload.result.tools
       .find(tool => tool.name.startsWith('mcp__WolframLanguage__'))?.configuredBy === 'Wolfram', candidates.body);
-    check('candidates include host-level tools', candidateNames.includes('working_directory'), candidates.body);
+    check('candidates include configurable host-level tools', candidateNames.includes('team_task_create'), candidates.body);
+    const alwaysInjected = [
+      'list_mcp_resource_templates',
+      'list_mcp_resources',
+      'load_workspace_dependencies',
+      'read_mcp_resource',
+      'working_directory',
+    ];
+    check('candidates exclude always-injected host tools', alwaysInjected.every(name => !candidateNames.includes(name)), candidates.body);
     check('candidates mark configured tools', candidatePayload.result.tools
-      .find(tool => tool.name === 'working_directory')?.configured === false, candidates.body);
+      .find(tool => tool.name === 'team_task_create')?.configured === false, candidates.body);
 
     // ---- POST a new pack -------------------------------------------------
 
     emitted.length = 0;
     const added = await request('/dsh-chat-mode/api/tools', 'POST', {
-      label: '工作目录',
-      tools: ['working_directory'],
-      guidance: '工作目录工具：仅在用户要求时使用。',
+      label: '团队任务',
+      tools: ['team_task_create'],
+      guidance: '团队任务工具：仅在用户要求时使用。',
     });
     const addedPayload = payload(added);
     check('POST tools appends a pack', added.statusCode === 200
       && addedPayload.ok === true
       && addedPayload.result.config.tools.length === 2, added.body);
     const addedPack = addedPayload.result.config.tools[1];
-    check('POST tools generates a default-icon pack', addedPack.label === '工作目录'
+    check('POST tools generates a default-icon pack', addedPack.label === '团队任务'
       && addedPack.icon === 'default'
-      && addedPack.guidance === '工作目录工具：仅在用户要求时使用。'
+      && addedPack.guidance === '团队任务工具：仅在用户要求时使用。'
       && Array.isArray(addedPack.tools)
-      && addedPack.tools.includes('working_directory'), added.body);
+      && addedPack.tools.includes('team_task_create'), added.body);
     check('POST tools emits the configuration-change event', emitted.includes('chat-mode/config-changed'), JSON.stringify(emitted));
 
     const stateAfterAdd = payload(await request('/dsh-chat-mode/api/state'));
     check('new pack is visible to the composer', stateAfterAdd.result.custom.some(pack => pack.id === addedPack.id && pack.available === true && pack.hidden === false), JSON.stringify(stateAfterAdd.result.custom));
     const candidatesAfterAdd = payload(await request('/dsh-chat-mode/api/candidates'));
     check('new pack marks its tool configured', candidatesAfterAdd.result.tools
-      .find(tool => tool.name === 'working_directory')?.configured === true, JSON.stringify(candidatesAfterAdd.result.tools));
+      .find(tool => tool.name === 'team_task_create')?.configured === true, JSON.stringify(candidatesAfterAdd.result.tools));
     check('new pack names itself as the tool owner', candidatesAfterAdd.result.tools
-      .find(tool => tool.name === 'working_directory')?.configuredBy === '工作目录', JSON.stringify(candidatesAfterAdd.result.tools));
+      .find(tool => tool.name === 'team_task_create')?.configuredBy === '团队任务', JSON.stringify(candidatesAfterAdd.result.tools));
 
     // ---- PATCH guidance and hidden ---------------------------------------
 
