@@ -70,6 +70,10 @@ export async function probeHost({ root, patchId, check }) {
     const definitions = [
       { name: 'bash' },
       { name: 'mcp__WolframLanguage__WolframLanguageEvaluator', description: 'Evaluate Wolfram Language.' },
+      { name: 'list_mcp_resource_templates', description: 'List MCP resource URI templates.' },
+      { name: 'list_mcp_resources', description: 'List MCP resources.' },
+      { name: 'load_workspace_dependencies', description: 'Load workspace dependencies.' },
+      { name: 'read_mcp_resource', description: 'Read an MCP resource.' },
       { name: 'working_directory', description: 'Show or change the working directory.' },
       { name: 'team_task_create', description: 'Create a shared team task.' },
     ];
